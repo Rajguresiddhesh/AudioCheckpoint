@@ -1,0 +1,21 @@
+# Runs the in-app route simulator through the seeded Swing/Ground checkpoints and
+# checks that both are triggered (audio state + trigger history). Device test; not run in CI.
+appId: com.isl.audiocheckpoints
+---
+- launchApp:
+    clearState: true
+- tapOn: "User Mode – map & tracking"
+- scrollUntilVisible:
+    element: "Simulate a walk through all checkpoints"
+- tapOn: "Simulate a walk through all checkpoints"
+- extendedWaitUntil:
+    visible: "Reached Swing.*"
+    timeout: 90000
+- extendedWaitUntil:
+    visible: "Reached Ground.*"
+    timeout: 120000
+- tapOn: "Permissions & status"
+- scrollUntilVisible:
+    element: "Swing · completed"
+    timeout: 60000
+- assertVisible: "Ground · completed"

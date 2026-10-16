@@ -1,0 +1,28 @@
+# Device/emulator UI test (Maestro, https://maestro.dev). NOT run in this repo's CI.
+# Run: maestro test .maestro/   (with a built app installed on an emulator/device)
+# Emulator: set a location first, e.g.  adb emu geo fix 73.0734127 19.2201417
+appId: com.isl.audiocheckpoints
+---
+- launchApp:
+    clearState: true
+- tapOn: "Creator Mode – add checkpoints"
+- tapOn:
+    text: "While using the app"
+    optional: true
+- tapOn: "Add by typing coordinates"
+- tapOn: "Name"
+- inputText: "Fountain"
+- tapOn: "Latitude"
+- inputText: "19.2210000"
+- tapOn: "Longitude"
+- inputText: "73.0740000"
+- hideKeyboard
+- scrollUntilVisible:
+    element: "Save checkpoint"
+- tapOn: "Save checkpoint"
+- assertVisible: "Fountain"
+# Persistence across restart
+- stopApp
+- launchApp
+- tapOn: "Creator Mode – add checkpoints"
+- assertVisible: "Fountain"

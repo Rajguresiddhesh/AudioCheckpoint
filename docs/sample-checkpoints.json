@@ -1,0 +1,31 @@
+{
+  "site": {
+    "name": "Ramdas Pundalik Patil Udyan",
+    "source": "https://maps.app.goo.gl/gJhNw9t6da8X8kz3A",
+    "resolvedPlacePin": { "latitude": 19.2198269, "longitude": 73.0734127 },
+    "resolvedOn": "2026-10-17",
+    "note": "The share link resolves to a single place pin for the whole park. It does not say where the swing or the ground are."
+  },
+  "checkpoints": [
+    {
+      "name": "Swing",
+      "latitude": 19.2201417,
+      "longitude": 73.0734127,
+      "triggerRadiusMeters": 20,
+      "audio": "melody:chime",
+      "priority": 0,
+      "coordinatesVerified": false,
+      "placeholderRule": "35 m due north of the park pin"
+    },
+    {
+      "name": "Ground",
+      "latitude": 19.2195121,
+      "longitude": 73.0734127,
+      "triggerRadiusMeters": 20,
+      "audio": "melody:bells",
+      "priority": 0,
+      "coordinatesVerified": false,
+      "placeholderRule": "35 m due south of the park pin"
+    }
+  ]
+}
