@@ -12,7 +12,7 @@ Built with **React Native + Expo (SDK 57, RN 0.86, TypeScript)**, MapLibre, SQLi
 
 ## Download
 
-Get the latest APK from the [Releases page](https://github.com/Rajguresiddhesh/AudioCheckpointMap/releases/latest)
+Get the latest APK from the [Releases page](https://github.com/Rajguresiddhesh/AudioCheckpoint/releases/latest)
 (open it on the phone, allow installing from your browser, then tap **Install**). It is a side-loading build signed with the
 Android debug key, so Play Protect may warn about an unknown developer.
 
