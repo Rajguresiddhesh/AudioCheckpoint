@@ -6,7 +6,7 @@ import type { AppSettings } from '../../config/settings';
 import type { Checkpoint } from '../../data/models';
 import { ValidationError } from '../../data/repositories';
 import { validateCheckpointDraft } from '../../engine/validation';
-import { toSample } from '../../location/expoLocation';
+import { getCurrentFix, promptEnableLocationServices } from '../../location/expoLocation';
 import { AudioPicker, type AudioChoice } from '../../ui/AudioPicker';
 import { Banner, Button, Card, Field, Loading, Muted, Row, Screen, Toggle } from '../../ui/components';
 import { fmtMeters, parseNumber } from '../../ui/format';
@@ -93,22 +93,28 @@ export default function EditCheckpoint() {
     setCapturing(true);
     setMessage(null);
     try {
-      const perm = await Location.getForegroundPermissionsAsync();
+      let perm = await Location.getForegroundPermissionsAsync();
+      if (perm.status !== 'granted') perm = await Location.requestForegroundPermissionsAsync();
       if (perm.status !== 'granted') {
         setMessage('Location permission is required.');
         return;
       }
-      const loc = toSample(await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation }));
-      const threshold = settings?.saveAccuracyThresholdM ?? 15;
-      if (settings?.requireAccuracyForSave && (loc.accuracyM == null || loc.accuracyM > threshold)) {
-        setMessage(`Accuracy ±${fmtMeters(loc.accuracyM)} is worse than ${threshold} m. Try again in a few seconds.`);
+      if (!(await Location.hasServicesEnabledAsync()) && !(await promptEnableLocationServices())) {
+        setMessage('Turn on location services (GPS) to capture your position.');
         return;
       }
+      const loc = await getCurrentFix();
+      const threshold = settings?.saveAccuracyThresholdM ?? 15;
+      const poor = loc.accuracyM == null || loc.accuracyM > threshold;
       setLat(loc.latitude.toFixed(7));
       setLon(loc.longitude.toFixed(7));
       if (loc.altitudeM != null) setAltitude(loc.altitudeM.toFixed(1));
       setCoordsTouched(true);
-      setMessage(`Captured position (±${fmtMeters(loc.accuracyM)}).`);
+      setMessage(
+        poor
+          ? `Captured position, but accuracy ±${fmtMeters(loc.accuracyM)} is worse than ${threshold} m. Press again in open sky for a better fix.`
+          : `Captured position (±${fmtMeters(loc.accuracyM)}).`,
+      );
     } catch (e) {
       setMessage(`Could not get a GPS fix: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

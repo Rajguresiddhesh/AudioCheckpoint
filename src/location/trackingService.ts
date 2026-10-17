@@ -44,30 +44,41 @@ export async function startGnssTracking(): Promise<void> {
   if (!r.servicesEnabled) throw new TrackingStartError('Location services (GPS) are turned off.');
   if (AppState.currentState !== 'active') throw new TrackingStartError('Open the app to start tracking.');
 
-  const { controller, settings } = await getServices();
+  const { controller } = await getServices();
   stopSimulation();
-  const s = await settings.load();
   await controller.startSession('gnss');
   try {
-    await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-      accuracy: Location.Accuracy.BestForNavigation,
-      timeInterval: s.locationIntervalMs,
-      // 0 so stationary users still produce fixes (needed for dwell/confirmation).
-      distanceInterval: 0,
-      pausesUpdatesAutomatically: false,
-      activityType: Location.ActivityType.Fitness,
-      foregroundService: {
-        notificationTitle: 'Audio checkpoints active',
-        notificationBody: 'Using GPS to play audio when you reach a checkpoint. Tap to open; stop in the app.',
-        notificationColor: '#2563eb',
-        killServiceOnDestroy: false,
-      },
-    });
+    await startLocationService();
   } catch (e) {
     await controller.stopSession();
     throw new TrackingStartError(`Could not start location updates: ${e instanceof Error ? e.message : String(e)}`);
   }
   startTicker();
+}
+
+/**
+ * (Re)registers the location task and its foreground service. Registering an
+ * already-registered task restarts its updates, which is needed after a crash
+ * or kill: the task registration survives in storage, so
+ * hasStartedLocationUpdatesAsync() reports true, but nothing is requesting fixes.
+ */
+async function startLocationService(): Promise<void> {
+  const { settings } = await getServices();
+  const s = await settings.load();
+  await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+    accuracy: Location.Accuracy.BestForNavigation,
+    timeInterval: s.locationIntervalMs,
+    // 0 so stationary users still produce fixes (needed for dwell/confirmation).
+    distanceInterval: 0,
+    pausesUpdatesAutomatically: false,
+    activityType: Location.ActivityType.Fitness,
+    foregroundService: {
+      notificationTitle: 'Audio checkpoints active',
+      notificationBody: 'Using GPS to play audio when you reach a checkpoint. Tap to open; stop in the app.',
+      notificationColor: '#2563eb',
+      killServiceOnDestroy: false,
+    },
+  });
 }
 
 export async function stopTracking(): Promise<void> {
@@ -97,13 +108,16 @@ export async function reconcileTrackingOnLaunch(): Promise<string | null> {
     await controller.stopSession();
     return 'Simulation ended when the app was closed.';
   }
-  if (await isGnssServiceRunning()) {
-    startTicker();
-    return null;
-  }
+  const wasRunning = await isGnssServiceRunning();
   try {
-    await startGnssTracking();
-    return 'Tracking was interrupted by the system and has been restarted.';
+    // Always re-register: keeps the open session and its engine state, and
+    // revives updates that a crash or kill silently stopped.
+    const r = await getLocationReadiness();
+    if (r.permission !== 'granted') throw new TrackingStartError('Location permission has not been granted.');
+    if (AppState.currentState !== 'active') throw new TrackingStartError('Open the app to start tracking.');
+    await startLocationService();
+    startTicker();
+    return wasRunning ? null : 'Tracking was interrupted by the system and has been restarted.';
   } catch (e) {
     await controller.stopSession();
     return `Tracking was interrupted and could not restart: ${e instanceof Error ? e.message : String(e)}`;

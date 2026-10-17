@@ -13,12 +13,13 @@ import {
 } from '../location/expoLocation';
 import { startGnssTracking, startSimulation, stopTracking } from '../location/trackingService';
 import { CheckpointMap } from '../map/CheckpointMap';
+import { GoogleCheckpointMap, googleMapsConfigured } from '../map/GoogleCheckpointMap';
 import { SchematicMap } from '../map/SchematicMap';
 import { Banner, Button, Chip, Row, StatusRow, colors, styles } from '../ui/components';
 import { accuracyTone, fmtAge, fmtMeters, QUALITY_TEXT, STATE_TEXT } from '../ui/format';
 import { useCheckpoints, useInterval, useServices, useTrackingStatus, useUsableMapPackage } from '../ui/hooks';
 
-type ViewMode = 'offline' | 'online' | 'schematic';
+type ViewMode = 'google' | 'offline' | 'online' | 'schematic';
 
 export default function UserMode() {
   const { services } = useServices();
@@ -38,7 +39,7 @@ export default function UserMode() {
   const styleUrl = settings?.mapStyleUrl ?? null;
   const maxAccuracy = settings?.engine.maxAccuracyM ?? 25;
 
-  const effectiveMode: ViewMode = mode ?? (pkg ? 'offline' : 'schematic');
+  const effectiveMode: ViewMode = mode ?? (googleMapsConfigured ? 'google' : pkg ? 'offline' : 'schematic');
 
   const states = useMemo(() => {
     const m: Record<string, CheckpointState | undefined> = {};
@@ -72,6 +73,11 @@ export default function UserMode() {
       }
       await requestNotificationPermission();
       await startGnssTracking();
+      if (!r.precise) {
+        setError(
+          'Only approximate location is allowed, so checkpoints cannot trigger. Allow “Precise” location for this app in system settings.',
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -106,7 +112,15 @@ export default function UserMode() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['bottom', 'left', 'right']}>
       <View style={s.mapBox}>
-        {showMap && mapStyle && !mapFailed ? (
+        {effectiveMode === 'google' ? (
+          <GoogleCheckpointMap
+            bounds={SITE.bounds}
+            checkpoints={checkpoints}
+            states={states}
+            user={last}
+            follow={!!status?.active}
+          />
+        ) : showMap && mapStyle && !mapFailed ? (
           <CheckpointMap
             styleUrl={mapStyle}
             bounds={effectiveMode === 'offline' && pkg ? pkg.bounds : SITE.bounds}
@@ -121,14 +135,24 @@ export default function UserMode() {
       </View>
       <ScrollView contentContainerStyle={styles.scroll}>
         <Row>
+          {googleMapsConfigured ? (
+            <Chip label="Google map" selected={effectiveMode === 'google'} onPress={() => setMode('google')} />
+          ) : null}
           <Chip label="Offline map" selected={effectiveMode === 'offline'} onPress={() => { setMapFailed(false); setMode('offline'); }} />
-          <Chip label="Online map" selected={effectiveMode === 'online'} onPress={() => { setMapFailed(false); setMode('online'); }} />
+          {!googleMapsConfigured ? (
+            <Chip label="Online map" selected={effectiveMode === 'online'} onPress={() => { setMapFailed(false); setMode('online'); }} />
+          ) : null}
           <Chip label="Schematic" selected={effectiveMode === 'schematic'} onPress={() => setMode('schematic')} />
         </Row>
         {effectiveMode === 'offline' && checked && !pkg ? (
           <Banner tone="warn">
             No verified offline map on this phone, so the schematic view is shown. Checkpoints and audio still work fully
             offline. Download the park area under Offline maps while you have internet.
+          </Banner>
+        ) : null}
+        {effectiveMode === 'google' ? (
+          <Banner tone="info">
+            Google map needs internet. Offline, switch to Offline map or Schematic; checkpoints and audio work either way.
           </Banner>
         ) : null}
         {effectiveMode === 'online' ? (

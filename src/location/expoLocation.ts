@@ -69,14 +69,57 @@ export async function promptEnableLocationServices(): Promise<boolean> {
   }
 }
 
-/** Foreground-only watcher used by Creator Mode (stops when the screen loses focus). */
+/**
+ * Foreground-only watcher used by Creator Mode (stops when the screen loses focus).
+ * Emits the last known fix and a quick network-assisted fix first, so a position
+ * shows up within seconds even indoors, then keeps refining with high-accuracy GPS.
+ * `receivedAtMs` is the phone time the fix arrived; use it for freshness, since
+ * the fix's own timestamp is GNSS time and can disagree with a skewed phone clock.
+ */
 export async function watchForeground(
-  onSample: (s: LocationSample) => void,
+  onSample: (s: LocationSample, receivedAtMs: number) => void,
   onError: (msg: string) => void,
 ): Promise<{ remove(): void }> {
-  return Location.watchPositionAsync(
+  let removed = false;
+  let gotLive = false;
+  const emit = (loc: Location.LocationObject | null, live: boolean) => {
+    if (removed || !loc) return;
+    if (!live && gotLive) return;
+    if (live) gotLive = true;
+    onSample(toSample(loc), live ? Date.now() : loc.timestamp);
+  };
+
+  Location.getLastKnownPositionAsync({ maxAge: 5 * 60_000 })
+    .then((loc) => emit(loc, false))
+    .catch(() => undefined);
+  Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+    .then((loc) => emit(loc, true))
+    .catch(() => undefined);
+
+  const sub = await Location.watchPositionAsync(
     { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 },
-    (loc) => onSample(toSample(loc)),
+    (loc) => emit(loc, true),
     (reason) => onError(String(reason)),
   );
+  return {
+    remove() {
+      removed = true;
+      sub.remove();
+    },
+  };
+}
+
+/** One-shot fix for "use my current position": high accuracy with a timeout, then a coarser fallback. */
+export async function getCurrentFix(timeoutMs = 15_000): Promise<LocationSample> {
+  const withTimeout = <T>(p: Promise<T>) =>
+    Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), timeoutMs))]);
+  try {
+    return toSample(await withTimeout(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High })));
+  } catch {
+    const loc =
+      (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }).catch(() => null)) ??
+      (await Location.getLastKnownPositionAsync().catch(() => null));
+    if (!loc) throw new Error('No GPS fix. Move into open sky and make sure location is on.');
+    return toSample(loc);
+  }
 }

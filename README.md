@@ -149,6 +149,7 @@ npx eas-cli@latest build -p android --profile development  # dev client APK
 | `POST_NOTIFICATIONS` (Android 13+) | Show that notification in the shade (tracking works without it) | On "Start tracking" |
 | `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `MODIFY_AUDIO_SETTINGS` | Added by expo-audio for background playback | Install-time |
 | `INTERNET` | **Only** for downloading an offline map / online map view | Install-time |
+| `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK` | Required by expo-task-manager, which hands each location fix to JS through a persisted JobScheduler job. Without it Android throws and the app crashes on the first fix | Install-time |
 
 **Not requested:** `ACCESS_BACKGROUND_LOCATION` ("Allow all the time") is explicitly removed. A user-started location foreground
 service only needs "While using the app". `RECORD_AUDIO`, storage and overlay permissions are also removed. This was verified
@@ -174,6 +175,23 @@ Restart the app after importing so the merged regions are listed and verified. T
 *Settings → Map style*.
 
 **Never done:** scraping Google Maps tiles, or treating a Google Maps share link as map data.
+
+### Google map (online)
+When the APK is built with a Google Maps API key, User Mode opens on a **Google map** (checkpoint circles coloured by
+state, your position and accuracy circle), and Creator Mode shows a map on which a **long-press adds a checkpoint** at that
+point. It needs internet; offline, switch to *Offline map* or *Schematic*. Detection and audio never depend on it.
+
+Set the key before generating the native project or building (it is read by `app.config.ts` and never committed):
+
+```bash
+# .env (git-ignored)
+GOOGLE_MAPS_API_KEY=AIza...
+```
+
+In Google Cloud: enable **Maps SDK for Android**, then restrict the key to Android apps with package
+`com.isl.audiocheckpoints` and the SHA-1 of the signing certificate (`cd android && ./gradlew signingReport`).
+For EAS builds, add the key as an EAS environment variable. Without a key the app builds normally and the Google option
+is hidden.
 
 ## 6. Using the app
 
