@@ -1,7 +1,6 @@
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, Linking, Pressable, Switch, Text, View } from 'react-native';
-import MapView, { Circle, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import { describeAudioRef } from '../audio/audioValidation';
 import type { AppSettings } from '../config/settings';
 import { distanceM } from '../engine/geo';
@@ -14,8 +13,7 @@ import {
   requestLocationPermission,
   watchForeground,
 } from '../location/expoLocation';
-import { checkpointColor } from '../map/geojson';
-import { googleMapsConfigured } from '../map/GoogleCheckpointMap';
+import { LeafletMap } from '../map/LeafletMap';
 import { Banner, Button, Card, Muted, Row, Screen, StatusRow, colors, styles } from '../ui/components';
 import { accuracyTone, fmtAge, fmtMeters } from '../ui/format';
 import { useCheckpoints, useInterval, useServices } from '../ui/hooks';
@@ -29,18 +27,7 @@ export default function CreatorMode() {
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [approximateOnly, setApproximateOnly] = useState(false);
   const [watchAttempt, setWatchAttempt] = useState(0);
-  const mapRef = useRef<MapView>(null);
-  const mapCentred = useRef(false);
-
-  // Centre the map on the first fix only, so the user can pan freely afterwards.
-  useEffect(() => {
-    if (!fix || mapCentred.current || !mapRef.current) return;
-    mapCentred.current = true;
-    mapRef.current.animateToRegion(
-      { latitude: fix.latitude, longitude: fix.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
-      500,
-    );
-  }, [fix]);
+  const [mapFailed, setMapFailed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   useInterval(() => setNow(Date.now()), 1000);
 
@@ -130,8 +117,8 @@ export default function CreatorMode() {
       pathname: '/checkpoint/[id]',
       params: {
         id: 'new',
-        lat: String(p.latitude),
-        lon: String(p.longitude),
+        lat: p.latitude.toFixed(7),
+        lon: p.longitude.toFixed(7),
         acc: p.accuracyM != null ? String(p.accuracyM) : '',
         alt: p.altitudeM != null ? String(p.altitudeM) : '',
       },
@@ -173,46 +160,22 @@ export default function CreatorMode() {
 
   return (
     <Screen>
-      {googleMapsConfigured ? (
-        <View style={{ height: 260, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: colors.border }}>
-          <MapView
-            style={{ flex: 1 }}
-            provider={PROVIDER_GOOGLE}
-            initialRegion={{ ...SITE.center, latitudeDelta: 0.006, longitudeDelta: 0.006 }}
-            ref={mapRef}
-            onLongPress={(e) => openNew(e.nativeEvent.coordinate)}
-            toolbarEnabled={false}
-          >
-            {checkpoints.map((c) => (
-              <Circle
-                key={c.id}
-                center={{ latitude: c.latitude, longitude: c.longitude }}
-                radius={c.triggerRadiusM}
-                strokeColor={checkpointColor(c, undefined)}
-                fillColor={checkpointColor(c, undefined) + '2e'}
-                strokeWidth={2}
-              />
-            ))}
-            {checkpoints.map((c) => (
-              <Marker key={`m-${c.id}`} coordinate={{ latitude: c.latitude, longitude: c.longitude }} title={c.name} />
-            ))}
-            {fix?.accuracyM ? (
-              <Circle
-                center={{ latitude: fix.latitude, longitude: fix.longitude }}
-                radius={fix.accuracyM}
-                strokeColor="rgba(37,99,235,0.5)"
-                fillColor="rgba(37,99,235,0.12)"
-              />
-            ) : null}
-            {fix ? (
-              <Marker coordinate={{ latitude: fix.latitude, longitude: fix.longitude }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
-                <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: '#2563eb', borderWidth: 3, borderColor: '#fff' }} />
-              </Marker>
-            ) : null}
-          </MapView>
-        </View>
+      {!mapFailed ? (
+        <>
+          <View style={{ height: 260, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: colors.border }}>
+            <LeafletMap
+              bounds={SITE.bounds}
+              checkpoints={checkpoints}
+              states={{}}
+              user={fix}
+              follow={false}
+              onLongPress={openNew}
+              onFail={() => setMapFailed(true)}
+            />
+          </View>
+          <Muted>Long-press the map to add a checkpoint at that point (map needs internet).</Muted>
+        </>
       ) : null}
-      {googleMapsConfigured ? <Muted>Long-press the map to add a checkpoint at that point.</Muted> : null}
       <Card title="Your position">
         {gpsError ? (
           <Banner tone="bad">

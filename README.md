@@ -176,22 +176,14 @@ Restart the app after importing so the merged regions are listed and verified. T
 
 **Never done:** scraping Google Maps tiles, or treating a Google Maps share link as map data.
 
-### Google map (online)
-When the APK is built with a Google Maps API key, User Mode opens on a **Google map** (checkpoint circles coloured by
-state, your position and accuracy circle), and Creator Mode shows a map on which a **long-press adds a checkpoint** at that
-point. It needs internet; offline, switch to *Offline map* or *Schematic*. Detection and audio never depend on it.
-
-Set the key before generating the native project or building (it is read by `app.config.ts` and never committed):
-
-```bash
-# .env (git-ignored)
-GOOGLE_MAPS_API_KEY=AIza...
-```
-
-In Google Cloud: enable **Maps SDK for Android**, then restrict the key to Android apps with package
-`com.isl.audiocheckpoints` and the SHA-1 of the signing certificate (`cd android && ./gradlew signingReport`).
-For EAS builds, add the key as an EAS environment variable. Without a key the app builds normally and the Google option
-is hidden.
+### Online map (Leaflet)
+User Mode opens on an **online map**: [Leaflet](https://leafletjs.com) 1.9.4 in a WebView with OpenStreetMap tiles,
+showing checkpoint circles coloured by state and your position with its accuracy circle. Creator Mode shows the same map;
+**long-press** it to add a checkpoint at that point. No API key is needed. It needs internet (Leaflet is loaded from
+unpkg with a pinned SRI hash, tiles from `tile.openstreetmap.org`); without internet the app falls back to the schematic
+view on its own. Detection and audio never depend on it. Tiles follow the
+[OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/) (the WebView identifies the app in its
+User-Agent); for heavy use, switch to a commercial tile provider in `src/map/LeafletMap.tsx`.
 
 ## 6. Using the app
 
@@ -279,7 +271,7 @@ database written by a newer app version.
 * Location, history and audio stay on the device. There is no backend, Firebase, analytics or tracking SDK. Core modules are
   test-checked for network calls. *Settings → Delete all local data* wipes checkpoints, history, imported audio, offline map
   packs and settings.
-* **Map data:** © OpenStreetMap contributors (ODbL), tiles via OpenFreeMap / OpenMapTiles schema. The MapLibre map shows the
+* **Map data:** © OpenStreetMap contributors (ODbL). Online map tiles from openstreetmap.org via Leaflet (BSD-2-Clause); offline packs via OpenFreeMap / OpenMapTiles schema. The MapLibre map shows the
   attribution button. Keep it visible.
 * **Libraries:** MapLibre Native / MapLibre React Native (BSD-2-Clause), Expo modules & React Native (MIT), sql.js (MIT, tests only).
 * **Audio:** the test melodies are original note sequences synthesised at runtime. No recordings are bundled. Imported audio is

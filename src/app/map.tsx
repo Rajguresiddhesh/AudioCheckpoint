@@ -13,13 +13,13 @@ import {
 } from '../location/expoLocation';
 import { startGnssTracking, startSimulation, stopTracking } from '../location/trackingService';
 import { CheckpointMap } from '../map/CheckpointMap';
-import { GoogleCheckpointMap, googleMapsConfigured } from '../map/GoogleCheckpointMap';
+import { LeafletMap } from '../map/LeafletMap';
 import { SchematicMap } from '../map/SchematicMap';
 import { Banner, Button, Chip, Row, StatusRow, colors, styles } from '../ui/components';
 import { accuracyTone, fmtAge, fmtMeters, QUALITY_TEXT, STATE_TEXT } from '../ui/format';
 import { useCheckpoints, useInterval, useServices, useTrackingStatus, useUsableMapPackage } from '../ui/hooks';
 
-type ViewMode = 'google' | 'offline' | 'online' | 'schematic';
+type ViewMode = 'offline' | 'online' | 'schematic';
 
 export default function UserMode() {
   const { services } = useServices();
@@ -28,6 +28,7 @@ export default function UserMode() {
   const { pkg, checked } = useUsableMapPackage(services);
   const [mode, setMode] = useState<ViewMode | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
+  const [tilesFailed, setTilesFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -36,10 +37,10 @@ export default function UserMode() {
   useEffect(() => {
     if (services) void services.settings.load().then(setSettings);
   }, [services]);
-  const styleUrl = settings?.mapStyleUrl ?? null;
   const maxAccuracy = settings?.engine.maxAccuracyM ?? 25;
 
-  const effectiveMode: ViewMode = mode ?? (googleMapsConfigured ? 'google' : pkg ? 'offline' : 'schematic');
+  // Online (Leaflet) by default; it falls back to the schematic view by itself when there is no internet.
+  const effectiveMode: ViewMode = mode ?? 'online';
 
   const states = useMemo(() => {
     const m: Record<string, CheckpointState | undefined> = {};
@@ -106,24 +107,29 @@ export default function UserMode() {
     }
   };
 
-  const showMap = (effectiveMode === 'offline' && pkg?.styleUrl) || (effectiveMode === 'online' && styleUrl);
-  const mapStyle = effectiveMode === 'offline' ? pkg?.styleUrl : styleUrl;
+  const selectMode = (m: ViewMode) => {
+    setMapFailed(false);
+    setTilesFailed(false);
+    setMode(m);
+  };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['bottom', 'left', 'right']}>
       <View style={s.mapBox}>
-        {effectiveMode === 'google' ? (
-          <GoogleCheckpointMap
+        {effectiveMode === 'online' && !mapFailed ? (
+          <LeafletMap
             bounds={SITE.bounds}
             checkpoints={checkpoints}
             states={states}
             user={last}
             follow={!!status?.active}
+            onFail={() => setMapFailed(true)}
+            onTilesFailed={() => setTilesFailed(true)}
           />
-        ) : showMap && mapStyle && !mapFailed ? (
+        ) : effectiveMode === 'offline' && pkg?.styleUrl && !mapFailed ? (
           <CheckpointMap
-            styleUrl={mapStyle}
-            bounds={effectiveMode === 'offline' && pkg ? pkg.bounds : SITE.bounds}
+            styleUrl={pkg.styleUrl}
+            bounds={pkg.bounds}
             checkpoints={checkpoints}
             states={states}
             user={last}
@@ -135,14 +141,9 @@ export default function UserMode() {
       </View>
       <ScrollView contentContainerStyle={styles.scroll}>
         <Row>
-          {googleMapsConfigured ? (
-            <Chip label="Google map" selected={effectiveMode === 'google'} onPress={() => setMode('google')} />
-          ) : null}
-          <Chip label="Offline map" selected={effectiveMode === 'offline'} onPress={() => { setMapFailed(false); setMode('offline'); }} />
-          {!googleMapsConfigured ? (
-            <Chip label="Online map" selected={effectiveMode === 'online'} onPress={() => { setMapFailed(false); setMode('online'); }} />
-          ) : null}
-          <Chip label="Schematic" selected={effectiveMode === 'schematic'} onPress={() => setMode('schematic')} />
+          <Chip label="Online map" selected={effectiveMode === 'online'} onPress={() => selectMode('online')} />
+          <Chip label="Offline map" selected={effectiveMode === 'offline'} onPress={() => selectMode('offline')} />
+          <Chip label="Schematic" selected={effectiveMode === 'schematic'} onPress={() => selectMode('schematic')} />
         </Row>
         {effectiveMode === 'offline' && checked && !pkg ? (
           <Banner tone="warn">
@@ -150,16 +151,15 @@ export default function UserMode() {
             offline. Download the park area under Offline maps while you have internet.
           </Banner>
         ) : null}
-        {effectiveMode === 'google' ? (
-          <Banner tone="info">
-            Google map needs internet. Offline, switch to Offline map or Schematic; checkpoints and audio work either way.
+        {effectiveMode === 'online' && mapFailed ? (
+          <Banner tone="warn">
+            The online map needs internet, so the schematic view is shown. Checkpoints and audio work fully offline.
           </Banner>
+        ) : effectiveMode === 'online' && tilesFailed ? (
+          <Banner tone="warn">Map tiles could not download (no internet?). Checkpoints and audio still work.</Banner>
         ) : null}
-        {effectiveMode === 'online' ? (
-          <Banner tone="info">Online map needs internet; tiles you have not downloaded will not appear offline.</Banner>
-        ) : null}
-        {mapFailed ? (
-          <Banner tone="bad">The map could not load (no data for this area or a damaged package). Showing the schematic view.</Banner>
+        {effectiveMode === 'offline' && mapFailed ? (
+          <Banner tone="bad">The offline map could not load (no data for this area or a damaged package). Showing the schematic view.</Banner>
         ) : null}
 
         <View style={styles.card}>
