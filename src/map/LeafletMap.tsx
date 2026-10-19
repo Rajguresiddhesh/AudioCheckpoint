@@ -83,7 +83,7 @@ export function LeafletMap({
       onMessage={onMessage}
       onError={() => onFail?.()}
       // OSM's tile policy asks apps to identify themselves.
-      applicationNameForUserAgent="AudioCheckpoints/0.2 (com.isl.audiocheckpoints)"
+      applicationNameForUserAgent="AudioCheckpoints/0.3 (com.isl.audiocheckpoints)"
       javaScriptEnabled
       setSupportMultipleWindows={false}
       overScrollMode="never"

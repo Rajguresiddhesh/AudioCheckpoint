@@ -5,11 +5,20 @@ import { Alert } from 'react-native';
 import type { AppSettings } from '../../config/settings';
 import type { Checkpoint } from '../../data/models';
 import { ValidationError } from '../../data/repositories';
-import { validateCheckpointDraft } from '../../engine/validation';
-import { getCurrentFix, promptEnableLocationServices } from '../../location/expoLocation';
+import { BEACON_ID_HELP } from '../../engine/beacons';
+import { POSITIONING_POLICIES, type AltitudeReference, type PositioningPolicy } from '../../engine/types';
+import {
+  DEFAULT_BEACON_OBSERVATIONS,
+  DEFAULT_MAX_VERTICAL_DIFFERENCE_M,
+  DEFAULT_MAX_VERTICAL_UNCERTAINTY_M,
+  DEFAULT_MIN_BEACON_RSSI_DBM,
+  validateCheckpointDraft,
+} from '../../engine/validation';
+import { scanNearbyBeacons } from '../../location/bleScanner';
+import { DEVICE_ALTITUDE_REFERENCE, getCurrentFix, promptEnableLocationServices } from '../../location/expoLocation';
 import { AudioPicker, type AudioChoice } from '../../ui/AudioPicker';
-import { Banner, Button, Card, Field, Loading, Muted, Row, Screen, Toggle } from '../../ui/components';
-import { fmtMeters, parseNumber } from '../../ui/format';
+import { Banner, Button, Card, Chip, Field, Loading, Muted, Row, Screen, Toggle } from '../../ui/components';
+import { ALTITUDE_REFERENCE_LABEL, fmtMeters, parseNumber, POLICY_HELP, POLICY_LABEL } from '../../ui/format';
 import { useServices } from '../../ui/hooks';
 
 export default function EditCheckpoint() {
@@ -29,6 +38,16 @@ export default function EditCheckpoint() {
   const [floor, setFloor] = useState('');
   const [altitude, setAltitude] = useState(params.alt ?? '');
   const [enabled, setEnabled] = useState(true);
+  const [policy, setPolicy] = useState<PositioningPolicy>('OUTDOOR_GPS');
+  const [maxHAcc, setMaxHAcc] = useState('');
+  const [altRef, setAltRef] = useState<AltitudeReference | null>(params.alt ? DEVICE_ALTITUDE_REFERENCE : null);
+  const [maxVDiff, setMaxVDiff] = useState(String(DEFAULT_MAX_VERTICAL_DIFFERENCE_M));
+  const [maxVUnc, setMaxVUnc] = useState(String(DEFAULT_MAX_VERTICAL_UNCERTAINTY_M));
+  const [beaconId, setBeaconId] = useState('');
+  const [minRssi, setMinRssi] = useState(String(DEFAULT_MIN_BEACON_RSSI_DBM));
+  const [reqObs, setReqObs] = useState(String(DEFAULT_BEACON_OBSERVATIONS));
+  const [nearby, setNearby] = useState<{ id: string; rssiDbm: number }[] | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [audio, setAudio] = useState<AudioChoice>({ uri: 'melody:chime', label: 'Chime (rising)' });
   const [coordsTouched, setCoordsTouched] = useState(isNew);
   const [allowNear, setAllowNear] = useState(false);
@@ -56,6 +75,14 @@ export default function EditCheckpoint() {
           setAltitude(cp.altitudeM != null ? String(cp.altitudeM) : '');
           setEnabled(cp.enabled);
           setAudio({ uri: cp.audioUri, label: cp.audioLabel });
+          setPolicy(cp.positioningPolicy);
+          setMaxHAcc(cp.maxHorizontalAccuracyM != null ? String(cp.maxHorizontalAccuracyM) : '');
+          setAltRef(cp.altitudeReference);
+          if (cp.maxVerticalDifferenceM != null) setMaxVDiff(String(cp.maxVerticalDifferenceM));
+          if (cp.maxVerticalUncertaintyM != null) setMaxVUnc(String(cp.maxVerticalUncertaintyM));
+          setBeaconId(cp.expectedBeaconId ?? '');
+          if (cp.minimumBeaconRssiDbm != null) setMinRssi(String(cp.minimumBeaconRssiDbm));
+          if (cp.requiredBeaconObservations != null) setReqObs(String(cp.requiredBeaconObservations));
         }
       } else {
         setRadius(String(s.defaultRadiusM));
@@ -64,13 +91,27 @@ export default function EditCheckpoint() {
     })();
   }, [services, isNew, params.id]);
 
+  const ble = policy === 'INDOOR_BLE' || policy === 'INDOOR_BLE_FLOOR';
+  const opt = (t: string) => (t.trim() === '' ? null : (parseNumber(t) ?? NaN));
+  const floorValue = floor.trim() === '' ? null : parseNumber(floor);
+  const floorInvalid = floor.trim() !== '' && (floorValue == null || !Number.isInteger(floorValue));
   const draft = {
     id: isNew ? undefined : params.id,
     name,
+    positioningPolicy: policy,
     latitude: parseNumber(lat) ?? NaN,
     longitude: parseNumber(lon) ?? NaN,
     triggerRadiusM: parseNumber(radius) ?? NaN,
     priority: parseNumber(priority) ?? NaN,
+    maxHorizontalAccuracyM: opt(maxHAcc),
+    floor: floorValue,
+    altitudeM: opt(altitude),
+    altitudeReference: altRef,
+    maxVerticalDifferenceM: opt(maxVDiff),
+    maxVerticalUncertaintyM: opt(maxVUnc),
+    expectedBeaconId: beaconId.trim() || null,
+    minimumBeaconRssiDbm: opt(minRssi),
+    requiredBeaconObservations: opt(reqObs),
   };
 
   const validation = useMemo(
@@ -83,11 +124,21 @@ export default function EditCheckpoint() {
           })
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [settings, existing, name, lat, lon, radius, priority, allowNear],
+    [settings, existing, name, lat, lon, radius, priority, allowNear, policy, maxHAcc, floor, altitude, altRef, maxVDiff,
+      maxVUnc, beaconId, minRssi, reqObs],
   );
 
-  const floorValue = floor.trim() === '' ? null : parseNumber(floor);
-  const floorInvalid = floor.trim() !== '' && (floorValue == null || !Number.isInteger(floorValue));
+  const scanBeacons = async () => {
+    setScanning(true);
+    setMessage(null);
+    try {
+      setNearby(await scanNearbyBeacons());
+    } catch (e) {
+      setMessage(`Beacon scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const captureCurrent = async () => {
     setCapturing(true);
@@ -108,7 +159,10 @@ export default function EditCheckpoint() {
       const poor = loc.accuracyM == null || loc.accuracyM > threshold;
       setLat(loc.latitude.toFixed(7));
       setLon(loc.longitude.toFixed(7));
-      if (loc.altitudeM != null) setAltitude(loc.altitudeM.toFixed(1));
+      if (loc.altitudeM != null && loc.altitudeReference != null) {
+        setAltitude(loc.altitudeM.toFixed(1));
+        setAltRef(loc.altitudeReference);
+      }
       setCoordsTouched(true);
       setMessage(
         poor
@@ -132,8 +186,6 @@ export default function EditCheckpoint() {
           audioUri: audio.uri,
           audioLabel: audio.label,
           enabled,
-          floor: floorValue,
-          altitudeM: altitude.trim() === '' ? null : parseNumber(altitude),
           coordinatesVerified: coordsTouched || (original?.coordinatesVerified ?? true),
         },
         {
@@ -223,22 +275,111 @@ export default function EditCheckpoint() {
           keyboardType="numbers-and-punctuation"
           hint="Higher plays first when two checkpoints qualify at the same time."
         />
-        <Field
-          label="Floor (optional)"
-          value={floor}
-          onChangeText={setFloor}
-          keyboardType="numbers-and-punctuation"
-          error={floorInvalid ? 'Floor must be a whole number.' : null}
-          hint="For future indoor (BLE) positioning. GPS cannot tell floors apart, so GPS fixes ignore this."
-        />
-        <Field
-          label="Altitude (m, optional)"
-          value={altitude}
-          onChangeText={setAltitude}
-          keyboardType="numbers-and-punctuation"
-          hint="Only used when altitude gating is enabled in Settings."
-        />
         <Toggle label="Enabled" value={enabled} onValueChange={setEnabled} />
+      </Card>
+
+      <Card title="How is this checkpoint detected?">
+        <Row>
+          {POSITIONING_POLICIES.map((p) => (
+            <Chip key={p} label={POLICY_LABEL[p]} selected={policy === p} onPress={() => setPolicy(p)} />
+          ))}
+        </Row>
+        <Muted>{POLICY_HELP[policy]}</Muted>
+
+        {!ble ? (
+          <Field
+            label="Required GPS accuracy (m, optional)"
+            value={maxHAcc}
+            onChangeText={setMaxHAcc}
+            keyboardType="numeric"
+            hint={`Blank = Settings value (${settings?.engine.maxAccuracyM ?? 25} m).`}
+          />
+        ) : null}
+
+        {policy === 'OUTDOOR_ELEVATION' ? (
+          <>
+            <Field
+              label="Altitude (m)"
+              value={altitude}
+              onChangeText={setAltitude}
+              keyboardType="numbers-and-punctuation"
+              hint="“Use my current position” fills this from GPS together with its reference."
+            />
+            <Muted>Altitude measured from</Muted>
+            <Row>
+              {(['ELLIPSOID', 'MSL'] as AltitudeReference[]).map((r) => (
+                <Chip key={r} label={ALTITUDE_REFERENCE_LABEL[r]} selected={altRef === r} onPress={() => setAltRef(r)} />
+              ))}
+            </Row>
+            {altRef && altRef !== DEVICE_ALTITUDE_REFERENCE ? (
+              <Banner tone="warn">
+                This phone reports altitude from the {ALTITUDE_REFERENCE_LABEL[DEVICE_ALTITUDE_REFERENCE].toLowerCase()}.
+                The two differ by tens of metres and are never mixed, so this checkpoint cannot trigger on this phone.
+                Capture the altitude on site with “Use my current position” instead.
+              </Banner>
+            ) : null}
+            <Field label="Allowed altitude difference (m)" value={maxVDiff} onChangeText={setMaxVDiff} keyboardType="numeric" />
+            <Field
+              label="Required vertical accuracy (m)"
+              value={maxVUnc}
+              onChangeText={setMaxVUnc}
+              keyboardType="numeric"
+              hint="Fixes with worse or unknown vertical accuracy never trigger this checkpoint."
+            />
+          </>
+        ) : null}
+
+        {ble ? (
+          <>
+            <Field
+              label="Beacon id"
+              value={beaconId}
+              onChangeText={setBeaconId}
+              autoCapitalize="none"
+              placeholder="ibeacon:<uuid>:<major>:<minor>"
+              hint={BEACON_ID_HELP}
+            />
+            <Button label="Scan for nearby beacons" variant="secondary" onPress={scanBeacons} busy={scanning} />
+            {nearby && nearby.length === 0 ? <Muted>No beacons heard. Is Bluetooth on and the beacon powered?</Muted> : null}
+            {nearby?.slice(0, 8).map((b) => (
+              <Chip
+                key={b.id}
+                label={`${b.rssiDbm} dBm · ${b.id}`}
+                selected={beaconId.trim().toLowerCase() === b.id}
+                onPress={() => {
+                  setBeaconId(b.id);
+                  // Standing at the spot: accept a little weaker than what is heard here now.
+                  setMinRssi(String(Math.max(-100, Math.round(b.rssiDbm - 8))));
+                }}
+              />
+            ))}
+            <Field
+              label="Minimum signal (dBm)"
+              value={minRssi}
+              onChangeText={setMinRssi}
+              keyboardType="numbers-and-punctuation"
+              hint="Closer to 0 = you must stand closer. Picking a scanned beacon sets this to 8 dB below its signal here."
+            />
+            <Field
+              label="Required observations"
+              value={reqObs}
+              onChangeText={setReqObs}
+              keyboardType="numeric"
+              hint="Consecutive 2-second scan windows with a strong signal before the audio plays."
+            />
+          </>
+        ) : null}
+
+        {ble || floor.trim() !== '' ? (
+          <Field
+            label={policy === 'INDOOR_BLE_FLOOR' ? 'Floor' : 'Floor (optional)'}
+            value={floor}
+            onChangeText={setFloor}
+            keyboardType="numbers-and-punctuation"
+            error={floorInvalid ? 'Floor must be a whole number.' : null}
+            hint="Whole number, e.g. 0 = ground floor. Each beacon belongs to one floor."
+          />
+        ) : null}
       </Card>
 
       <Card>

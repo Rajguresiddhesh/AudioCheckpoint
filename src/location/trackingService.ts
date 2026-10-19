@@ -3,7 +3,12 @@ import * as TaskManager from 'expo-task-manager';
 import { AppState } from 'react-native';
 import { demoRouteThrough, simulateRoute } from '../engine/simulator';
 import { normaliseBatchTimestamps } from '../engine/timestamps';
+import { normaliseBeaconId } from '../engine/beacons';
+import { distanceM } from '../engine/geo';
+import type { BeaconObservation, LocationSample } from '../engine/types';
+import type { Checkpoint } from '../data/models';
 import { getServices } from '../tracking/runtime';
+import { startBeaconScanning, stopBeaconScanning } from './bleScanner';
 import { getLocationReadiness, toSample } from './expoLocation';
 
 export const LOCATION_TASK = 'audio-checkpoint-location';
@@ -16,6 +21,8 @@ export function registerLocationTask(): void {
   if (TaskManager.isTaskDefined(LOCATION_TASK)) return;
   TaskManager.defineTask<{ locations: Location.LocationObject[] }>(LOCATION_TASK, async ({ data, error }) => {
     const services = await getServices();
+    // Headless restart: beacon scanning must come back together with GPS.
+    void installBeaconSync();
     if (error) {
       services.controller.reportError(`Location error: ${error.message}`);
       return;
@@ -31,6 +38,51 @@ export function registerLocationTask(): void {
 }
 
 export class TrackingStartError extends Error {}
+
+// --- BLE scanning follows the session ------------------------------------------
+
+let beaconSyncInstalled = false;
+let beaconSyncChain: Promise<void> = Promise.resolve();
+let beaconSyncKey = '';
+
+/**
+ * Keep BLE scanning in step with tracking: on only while a GPS session is
+ * active and some enabled checkpoint is an indoor (beacon) checkpoint. Reacts
+ * to session start/stop and checkpoint edits. Idempotent.
+ */
+export async function installBeaconSync(): Promise<void> {
+  if (beaconSyncInstalled) return;
+  beaconSyncInstalled = true;
+  const { controller } = await getServices();
+  const sync = () => {
+    beaconSyncChain = beaconSyncChain
+      .then(async () => {
+        const st = controller.getStatus();
+        const ids = controller.beaconIds();
+        const want = st.active && st.source === 'gnss' && controller.needsBeaconScans();
+        const eddystoneOnly = ids.length > 0 && ids.every((id) => id.toLowerCase().startsWith('eddystone:'));
+        // Act only on changes, so a failure report (which republishes status) cannot loop.
+        const key = want ? `on:${eddystoneOnly}` : 'off';
+        if (key === beaconSyncKey) return;
+        beaconSyncKey = key;
+        if (!want) {
+          await stopBeaconScanning();
+          return;
+        }
+        const problem = await startBeaconScanning((scan) => void controller.handleBeaconScan(scan), { eddystoneOnly });
+        if (problem) controller.reportError(`Indoor checkpoints cannot trigger: ${problem}`);
+      })
+      .catch(() => undefined);
+  };
+  controller.subscribe(sync);
+  sync();
+}
+
+/** Forget the last scanning decision so the next status change retries (e.g. after enabling Bluetooth). */
+export function retryBeaconScanning(): void {
+  beaconSyncKey = '';
+  void getServices().then((s) => s.controller.reloadCheckpoints());
+}
 
 /**
  * Start GNSS tracking through a location foreground service. With the
@@ -170,10 +222,47 @@ export async function startSimulation(options: { speedMps?: number; accuracyM?: 
       void controller.stopSession();
       return;
     }
-    const f = fixes[i++];
-    void controller.handleSamples([{ ...f, timestampMs: Date.now() }]);
+    const now = Date.now();
+    const f = { ...fixes[i++], timestampMs: now };
+    void controller.handleSamples([withSimulatedAltitude(f, list)]);
+    if (list.some(isBleCheckpoint)) {
+      void controller.handleBeaconScan({ timestampMs: now, beacons: simulatedBeacons(f, list), source: 'simulated' });
+    }
   }, 1000);
   startTicker();
+}
+
+const isBleCheckpoint = (c: Checkpoint) =>
+  c.positioningPolicy === 'INDOOR_BLE' || c.positioningPolicy === 'INDOOR_BLE_FLOOR';
+
+/**
+ * Demo only: near an elevation checkpoint, report that checkpoint's altitude
+ * (same datum, ±3 m) so the walk exercises the vertical check. Elsewhere the
+ * fix has no altitude, exactly like a real fix without vertical data.
+ */
+function withSimulatedAltitude(f: LocationSample, list: Checkpoint[]): LocationSample {
+  const near = list.find(
+    (c) =>
+      c.positioningPolicy === 'OUTDOOR_ELEVATION' &&
+      c.altitudeM != null &&
+      c.altitudeReference != null &&
+      distanceM(c, f) <= c.triggerRadiusM * 2,
+  );
+  if (!near) return { ...f, altitudeM: null, altitudeAccuracyM: null, altitudeReference: null };
+  return { ...f, altitudeM: near.altitudeM, altitudeAccuracyM: 3, altitudeReference: near.altitudeReference };
+}
+
+/** Demo only: a BLE checkpoint's beacon is heard while the simulated walker is inside its radius. */
+function simulatedBeacons(f: LocationSample, list: Checkpoint[]): BeaconObservation[] {
+  const out: BeaconObservation[] = [];
+  for (const c of list) {
+    if (!isBleCheckpoint(c) || !c.expectedBeaconId) continue;
+    const id = normaliseBeaconId(c.expectedBeaconId);
+    const d = distanceM(c, f);
+    if (!id || d > c.triggerRadiusM) continue;
+    out.push({ id, rssiDbm: Math.round((c.minimumBeaconRssiDbm ?? -75) + 10 - d / 2) });
+  }
+  return out;
 }
 
 export function stopSimulation(): void {

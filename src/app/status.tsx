@@ -124,8 +124,16 @@ export default function StatusScreen() {
           <StatusRow
             key={c.id}
             label={c.name}
-            value={`${STATE_TEXT[c.state]}${c.distanceM != null ? ` · ${fmtMeters(c.distanceM)}` : ''}`}
-            tone={c.state === 'PLAYING' || c.state === 'TRIGGERED' ? 'good' : c.state === 'CANDIDATE' ? 'warn' : 'info'}
+            value={`${c.waitingFor ?? STATE_TEXT[c.state]}${c.distanceM != null ? ` · ${fmtMeters(c.distanceM)}` : ''}`}
+            tone={
+              c.waitingFor
+                ? 'warn'
+                : c.state === 'PLAYING' || c.state === 'TRIGGERED'
+                  ? 'good'
+                  : c.state === 'CANDIDATE'
+                    ? 'warn'
+                    : 'info'
+            }
           />
         ))}
       </Card>
@@ -138,7 +146,8 @@ export default function StatusScreen() {
               {h.checkpointName ?? 'Deleted checkpoint'} · {h.playbackStatus}
             </Text>
             <Muted>
-              {fmtTime(h.triggeredAt)} · {fmtMeters(h.distanceM)} from centre · ±{fmtMeters(h.accuracyM)}
+              {fmtTime(h.triggeredAt)} ·{' '}
+              {h.evidence ?? `${fmtMeters(h.distanceM)} from centre · ±${fmtMeters(h.accuracyM)}`}
             </Muted>
           </View>
         ))}

@@ -29,6 +29,9 @@ describe('GeoJSON overlays', () => {
   const cp = {
     id: 'a', name: 'Swing', latitude: 19.22, longitude: 73.07, triggerRadiusM: 20, audioUri: null, audioLabel: null,
     enabled: true, priority: 0, floor: null, altitudeM: null, coordinatesVerified: true, createdAt: 0, updatedAt: 0,
+    positioningPolicy: 'OUTDOOR_GPS' as const, maxHorizontalAccuracyM: null, altitudeReference: null,
+    maxVerticalDifferenceM: null, maxVerticalUncertaintyM: null, expectedBeaconId: null,
+    minimumBeaconRssiDbm: null, requiredBeaconObservations: null,
   };
   it('builds one polygon per checkpoint coloured by state', () => {
     const fc = checkpointAreas([cp, { ...cp, id: 'b', enabled: false }], { a: 'PLAYING' });

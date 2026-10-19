@@ -1,9 +1,15 @@
+import type { AltitudeReference, PositioningPolicy } from '../engine/types';
+
 export interface Checkpoint {
   id: string;
   name: string;
+  positioningPolicy: PositioningPolicy;
   latitude: number;
   longitude: number;
+  /** Horizontal trigger radius. */
   triggerRadiusM: number;
+  /** null = use the global Settings limit. */
+  maxHorizontalAccuracyM: number | null;
   /** 'melody:<id>' for generated test tones, a file:// URI for imported audio, or null. */
   audioUri: string | null;
   audioLabel: string | null;
@@ -11,6 +17,13 @@ export interface Checkpoint {
   priority: number;
   floor: number | null;
   altitudeM: number | null;
+  altitudeReference: AltitudeReference | null;
+  maxVerticalDifferenceM: number | null;
+  maxVerticalUncertaintyM: number | null;
+  /** Canonical beacon id, see src/engine/beacons.ts. */
+  expectedBeaconId: string | null;
+  minimumBeaconRssiDbm: number | null;
+  requiredBeaconObservations: number | null;
   /** False for placeholder coordinates that must be re-captured on site. */
   coordinatesVerified: boolean;
   createdAt: number;
@@ -69,6 +82,8 @@ export interface TriggerHistoryEntry {
   playbackStatus: PlaybackStatus;
   distanceM: number | null;
   accuracyM: number | null;
+  /** What caused the trigger (GPS/altitude/beacon/floor), for field debugging. */
+  evidence: string | null;
 }
 
 export interface TrackingSession {

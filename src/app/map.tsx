@@ -11,12 +11,13 @@ import {
   requestLocationPermission,
   requestNotificationPermission,
 } from '../location/expoLocation';
-import { startGnssTracking, startSimulation, stopTracking } from '../location/trackingService';
+import { getBleStatus, requestBlePermission, subscribeBleStatus, type BleStatus } from '../location/bleScanner';
+import { retryBeaconScanning, startGnssTracking, startSimulation, stopTracking } from '../location/trackingService';
 import { CheckpointMap } from '../map/CheckpointMap';
 import { LeafletMap } from '../map/LeafletMap';
 import { SchematicMap } from '../map/SchematicMap';
 import { Banner, Button, Chip, Row, StatusRow, colors, styles } from '../ui/components';
-import { accuracyTone, fmtAge, fmtMeters, QUALITY_TEXT, STATE_TEXT } from '../ui/format';
+import { accuracyTone, fmtAge, fmtMeters, POLICY_LABEL, QUALITY_TEXT, STATE_TEXT } from '../ui/format';
 import { useCheckpoints, useInterval, useServices, useTrackingStatus, useUsableMapPackage } from '../ui/hooks';
 
 type ViewMode = 'offline' | 'online' | 'schematic';
@@ -34,6 +35,8 @@ export default function UserMode() {
   const [now, setNow] = useState(() => Date.now());
   const [settings, setSettings] = useState<AppSettings | null>(null);
   useInterval(() => setNow(Date.now()), 1000);
+  const [ble, setBle] = useState<BleStatus>(getBleStatus);
+  useEffect(() => subscribeBleStatus(setBle), []);
   useEffect(() => {
     if (services) void services.settings.load().then(setSettings);
   }, [services]);
@@ -73,6 +76,10 @@ export default function UserMode() {
         return;
       }
       await requestNotificationPermission();
+      // Indoor checkpoints need "Nearby devices" (Android 12+); ask while the app is in front.
+      if (services?.controller.needsBeaconScans() && !(await requestBlePermission())) {
+        setError('Bluetooth ("Nearby devices") permission was denied, so indoor beacon checkpoints cannot trigger.');
+      }
       await startGnssTracking();
       if (!r.precise) {
         setError(
@@ -206,6 +213,36 @@ export default function UserMode() {
             value={status?.audio.current ? `${status.audio.status}: ${status.audio.current.label}` : 'Idle'}
             tone={status?.audio.status === 'playing' ? 'good' : 'muted'}
           />
+          {status?.active
+            ? status.engine.checkpoints
+                .filter((c) => c.policy !== 'OUTDOOR_GPS')
+                .map((c) => (
+                  <StatusRow
+                    key={c.id}
+                    label={`${c.name} (${POLICY_LABEL[c.policy]})`}
+                    value={c.waitingFor ?? STATE_TEXT[c.state]}
+                    tone={c.waitingFor ? 'warn' : c.state === 'OUTSIDE' ? 'muted' : 'good'}
+                  />
+                ))
+            : null}
+          {status?.active && ble.kind !== 'stopped' ? (
+            <StatusRow
+              label="Beacons"
+              value={
+                ble.kind === 'unavailable'
+                  ? ble.message
+                  : `${ble.lastHeard ? `heard ${fmtAge(now - ble.lastHeard)}` : 'none heard yet'}${
+                      status.engine.floorEstimate != null ? ` · floor ${status.engine.floorEstimate}` : ''
+                    }`
+              }
+              tone={ble.kind === 'unavailable' ? 'bad' : ble.lastHeard ? 'good' : 'warn'}
+            />
+          ) : null}
+          {status?.active && ble.kind === 'unavailable' ? (
+            <Text style={[styles.hint, { color: colors.primary }]} onPress={retryBeaconScanning}>
+              Retry Bluetooth
+            </Text>
+          ) : null}
           {status?.lastEventText ? <Text style={styles.hint}>{status.lastEventText}</Text> : null}
         </View>
 

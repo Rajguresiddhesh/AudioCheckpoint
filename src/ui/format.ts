@@ -1,4 +1,4 @@
-import type { CheckpointState, SampleQuality } from '../engine/types';
+import type { AltitudeReference, CheckpointState, PositioningPolicy, SampleQuality } from '../engine/types';
 import type { Tone } from './components';
 
 export function fmtMeters(m: number | null | undefined): string {
@@ -39,6 +39,28 @@ export const STATE_TEXT: Record<CheckpointState, string> = {
   TRIGGERED: 'Triggered',
   PLAYING: 'Playing',
   COOLDOWN: 'Visited (leave to rearm)',
+};
+
+export const POLICY_LABEL: Record<PositioningPolicy, string> = {
+  OUTDOOR_GPS: 'GPS',
+  OUTDOOR_ELEVATION: 'GPS + altitude',
+  INDOOR_BLE: 'Indoor beacon',
+  INDOOR_BLE_FLOOR: 'Indoor beacon + floor',
+};
+
+export const POLICY_HELP: Record<PositioningPolicy, string> = {
+  OUTDOOR_GPS: 'Outdoors, flat ground. Triggers on GPS position only.',
+  OUTDOOR_ELEVATION:
+    'Hills, forts, viewpoints. Triggers only when GPS position AND altitude match; no altitude data = no trigger.',
+  INDOOR_BLE: 'Indoors. Triggers only when this Bluetooth beacon is heard strongly enough. GPS is ignored.',
+  INDOOR_BLE_FLOOR:
+    'Multi-floor buildings. Beacon must be strong AND beacons must place you on this floor. Same spot on another floor never triggers.',
+};
+
+export const ALTITUDE_REFERENCE_LABEL: Record<AltitudeReference, string> = {
+  ELLIPSOID: 'GPS ellipsoid (WGS84)',
+  MSL: 'Mean sea level',
+  BAROMETRIC_RELATIVE: 'Barometer (relative)',
 };
 
 /** Parse a decimal number from a text field; null when blank or invalid. */

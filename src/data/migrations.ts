@@ -76,6 +76,30 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    version: 2,
+    description: 'Positioning policies (GPS, elevation, indoor BLE, BLE + floor) and trigger evidence',
+    statements: [
+      // Existing checkpoints keep behaving exactly as before: GPS-only.
+      `ALTER TABLE checkpoints ADD COLUMN positioning_policy TEXT NOT NULL DEFAULT 'OUTDOOR_GPS'
+        CHECK (positioning_policy IN ('OUTDOOR_GPS','OUTDOOR_ELEVATION','INDOOR_BLE','INDOOR_BLE_FLOOR'))`,
+      `ALTER TABLE checkpoints ADD COLUMN max_horizontal_accuracy_m REAL
+        CHECK (max_horizontal_accuracy_m IS NULL OR max_horizontal_accuracy_m > 0)`,
+      `ALTER TABLE checkpoints ADD COLUMN altitude_reference TEXT
+        CHECK (altitude_reference IS NULL OR altitude_reference IN ('ELLIPSOID','MSL','BAROMETRIC_RELATIVE'))`,
+      `ALTER TABLE checkpoints ADD COLUMN max_vertical_difference_m REAL
+        CHECK (max_vertical_difference_m IS NULL OR max_vertical_difference_m > 0)`,
+      `ALTER TABLE checkpoints ADD COLUMN max_vertical_uncertainty_m REAL
+        CHECK (max_vertical_uncertainty_m IS NULL OR max_vertical_uncertainty_m > 0)`,
+      `ALTER TABLE checkpoints ADD COLUMN expected_beacon_id TEXT`,
+      `ALTER TABLE checkpoints ADD COLUMN minimum_beacon_rssi_dbm REAL`,
+      `ALTER TABLE checkpoints ADD COLUMN required_beacon_observations INTEGER
+        CHECK (required_beacon_observations IS NULL OR required_beacon_observations >= 1)`,
+      // v1 could only capture altitude from Android GNSS, which reports WGS84 ellipsoid height.
+      `UPDATE checkpoints SET altitude_reference = 'ELLIPSOID' WHERE altitude_m IS NOT NULL`,
+      `ALTER TABLE trigger_history ADD COLUMN evidence TEXT`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

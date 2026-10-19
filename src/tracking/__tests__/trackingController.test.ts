@@ -85,7 +85,10 @@ async function buildWorld(db?: SqlJsDb, missingUris: string[] = []) {
 
 async function addSwingAndGround(checkpoints: CheckpointRepository, groundAudio: string | null = 'melody:bells') {
   const opts = { duplicateDistanceM: 5, exitHysteresisM: 10 };
-  const common = { triggerRadiusM: 20, priority: 0, enabled: true, floor: null, altitudeM: null, coordinatesVerified: true };
+  const common = {
+    positioningPolicy: 'OUTDOOR_GPS' as const,
+    triggerRadiusM: 20, priority: 0, enabled: true, floor: null, altitudeM: null, coordinatesVerified: true,
+  };
   const swingP = destinationPoint(ORIGIN, 0, 35);
   const groundP = destinationPoint(ORIGIN, 180, 35);
   const swing = await checkpoints.save(
@@ -160,6 +163,40 @@ describe('TrackingController (simulated walk, end to end)', () => {
     await w.controller.startSession('simulated');
     await walk(w, simulateRoute([destinationPoint(ground, 180, 50), { ...ground, dwellMs: 5000 }], { startMs: T0 }));
     expect((await w.history.recent())[0].playbackStatus).toBe('missing');
+  });
+
+  it('mixed indoor + outdoor: floors stacked on the same lat/lon play only for the floor the user is on', async () => {
+    const w = await buildWorld();
+    const opts = { duplicateDistanceM: 5, exitHysteresisM: 10 };
+    const common = {
+      triggerRadiusM: 20, priority: 0, enabled: true, altitudeM: null, coordinatesVerified: true, ...ORIGIN,
+      positioningPolicy: 'INDOOR_BLE_FLOOR' as const, minimumBeaconRssiDbm: -75, requiredBeaconObservations: 2,
+    };
+    const B1 = 'ibeacon:f7826da6-4fa2-4e98-8024-bc5b71e0893e:7:1';
+    const B2 = 'ibeacon:f7826da6-4fa2-4e98-8024-bc5b71e0893e:7:2';
+    await w.checkpoints.save({ ...common, name: 'Ground floor', floor: 0, expectedBeaconId: B1, audioUri: 'melody:chime', audioLabel: null }, opts);
+    await w.checkpoints.save({ ...common, name: 'First floor', floor: 1, expectedBeaconId: B2, audioUri: 'melody:bells', audioLabel: null }, opts);
+    await w.controller.init();
+    await w.controller.startSession('gnss');
+    expect(w.controller.needsBeaconScans()).toBe(true);
+
+    // GPS standing exactly on the shared lat/lon: nothing may play.
+    await walk(w, Array.from({ length: 6 }, (_, i) => ({ ...ORIGIN, accuracyM: 4, timestampMs: T0 + i * 1000 })));
+    expect(w.backend.played).toEqual([]);
+
+    // Beacons place the user on the first floor (ground floor beacon leaks through at -78 dBm).
+    for (let i = 0; i < 3; i++) {
+      w.clock.now = T0 + 10_000 + i * 2000;
+      await w.controller.handleBeaconScan({
+        timestampMs: w.clock.now,
+        beacons: [{ id: B2, rssiDbm: -60 }, { id: B1, rssiDbm: -78 }],
+      });
+      await drain();
+    }
+    expect(w.backend.played).toEqual(['file:///audio/melody_bells.wav']);
+    const [h] = await w.history.recent();
+    expect(h).toMatchObject({ checkpointName: 'First floor', distanceM: null });
+    expect(h.evidence).toMatch(/floor 1/);
   });
 
   it('ignores samples when no session is active', async () => {

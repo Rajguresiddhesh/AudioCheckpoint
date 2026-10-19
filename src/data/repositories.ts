@@ -1,9 +1,11 @@
 import { mergeSettings, type AppSettings } from '../config/settings';
 import {
+  normalisePolicyFields,
   validateCheckpointDraft,
   type CheckpointDraft,
   type ValidationResult,
 } from '../engine/validation';
+import type { AltitudeReference, PositioningPolicy } from '../engine/types';
 import type {
   Checkpoint,
   DownloadStatus,
@@ -41,20 +43,36 @@ interface CheckpointRow {
   coordinates_verified: number;
   created_at: number;
   updated_at: number;
+  positioning_policy: PositioningPolicy;
+  max_horizontal_accuracy_m: number | null;
+  altitude_reference: AltitudeReference | null;
+  max_vertical_difference_m: number | null;
+  max_vertical_uncertainty_m: number | null;
+  expected_beacon_id: string | null;
+  minimum_beacon_rssi_dbm: number | null;
+  required_beacon_observations: number | null;
 }
 
 const toCheckpoint = (r: CheckpointRow): Checkpoint => ({
   id: r.id,
   name: r.name,
+  positioningPolicy: r.positioning_policy,
   latitude: r.latitude,
   longitude: r.longitude,
   triggerRadiusM: r.trigger_radius_m,
+  maxHorizontalAccuracyM: r.max_horizontal_accuracy_m,
   audioUri: r.audio_uri,
   audioLabel: r.audio_label,
   enabled: r.enabled === 1,
   priority: r.priority,
   floor: r.floor,
   altitudeM: r.altitude_m,
+  altitudeReference: r.altitude_reference,
+  maxVerticalDifferenceM: r.max_vertical_difference_m,
+  maxVerticalUncertaintyM: r.max_vertical_uncertainty_m,
+  expectedBeaconId: r.expected_beacon_id,
+  minimumBeaconRssiDbm: r.minimum_beacon_rssi_dbm,
+  requiredBeaconObservations: r.required_beacon_observations,
   coordinatesVerified: r.coordinates_verified === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -64,8 +82,6 @@ export interface CheckpointInput extends CheckpointDraft {
   audioUri: string | null;
   audioLabel: string | null;
   enabled: boolean;
-  floor: number | null;
-  altitudeM: number | null;
   coordinatesVerified: boolean;
 }
 
@@ -111,6 +127,7 @@ export class CheckpointRepository {
 
     const t = this.now();
     const name = input.name.trim().replace(/\s+/g, ' ');
+    const p = normalisePolicyFields(input);
     const values: SqlParam[] = [
       name,
       input.latitude,
@@ -120,14 +137,25 @@ export class CheckpointRepository {
       input.audioLabel,
       input.enabled ? 1 : 0,
       input.priority,
-      input.floor,
-      input.altitudeM,
+      p.floor,
+      p.altitudeM,
       input.coordinatesVerified ? 1 : 0,
+      p.positioningPolicy,
+      p.maxHorizontalAccuracyM,
+      p.altitudeReference,
+      p.maxVerticalDifferenceM,
+      p.maxVerticalUncertaintyM,
+      p.expectedBeaconId,
+      p.minimumBeaconRssiDbm,
+      p.requiredBeaconObservations,
     ];
     if (input.id && (await this.get(input.id))) {
       await this.db.runAsync(
         `UPDATE checkpoints SET name=?, latitude=?, longitude=?, trigger_radius_m=?, audio_uri=?,
-           audio_label=?, enabled=?, priority=?, floor=?, altitude_m=?, coordinates_verified=?, updated_at=?
+           audio_label=?, enabled=?, priority=?, floor=?, altitude_m=?, coordinates_verified=?,
+           positioning_policy=?, max_horizontal_accuracy_m=?, altitude_reference=?, max_vertical_difference_m=?,
+           max_vertical_uncertainty_m=?, expected_beacon_id=?, minimum_beacon_rssi_dbm=?,
+           required_beacon_observations=?, updated_at=?
          WHERE id=?`,
         [...values, t, input.id],
       );
@@ -136,8 +164,10 @@ export class CheckpointRepository {
     const id = input.id ?? this.newId();
     await this.db.runAsync(
       `INSERT INTO checkpoints (name, latitude, longitude, trigger_radius_m, audio_uri, audio_label,
-         enabled, priority, floor, altitude_m, coordinates_verified, created_at, updated_at, id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         enabled, priority, floor, altitude_m, coordinates_verified, positioning_policy, max_horizontal_accuracy_m,
+         altitude_reference, max_vertical_difference_m, max_vertical_uncertainty_m, expected_beacon_id,
+         minimum_beacon_rssi_dbm, required_beacon_observations, created_at, updated_at, id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [...values, t, t, id],
     );
     return (await this.get(id))!;
@@ -304,9 +334,10 @@ export class TriggerHistoryRepository {
 
   async record(e: Omit<TriggerHistoryEntry, 'id' | 'checkpointName'>): Promise<number> {
     const r = await this.db.runAsync(
-      `INSERT INTO trigger_history (checkpoint_id, session_id, triggered_at, playback_status, distance_m, accuracy_m)
-       VALUES (?,?,?,?,?,?)`,
-      [e.checkpointId, e.sessionId, e.triggeredAt, e.playbackStatus, e.distanceM, e.accuracyM],
+      `INSERT INTO trigger_history (checkpoint_id, session_id, triggered_at, playback_status, distance_m, accuracy_m,
+         evidence)
+       VALUES (?,?,?,?,?,?,?)`,
+      [e.checkpointId, e.sessionId, e.triggeredAt, e.playbackStatus, e.distanceM, e.accuracyM, e.evidence],
     );
     return r.lastInsertRowId;
   }
@@ -325,6 +356,7 @@ export class TriggerHistoryRepository {
       playback_status: PlaybackStatus;
       distance_m: number | null;
       accuracy_m: number | null;
+      evidence: string | null;
     }>(
       `SELECT h.*, c.name FROM trigger_history h LEFT JOIN checkpoints c ON c.id = h.checkpoint_id
        ORDER BY h.triggered_at DESC, h.id DESC LIMIT ?`,
@@ -339,6 +371,7 @@ export class TriggerHistoryRepository {
       playbackStatus: r.playback_status,
       distanceM: r.distance_m,
       accuracyM: r.accuracy_m,
+      evidence: r.evidence,
     }));
   }
 

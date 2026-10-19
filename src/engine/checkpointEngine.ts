@@ -1,7 +1,9 @@
-import { distanceM } from './geo';
+import { beaconFloorMap, estimateFloor } from './beacons';
+import { evaluateFix, evaluateScan, isBlePolicy, requiredObservations, type Evidence } from './policy';
 import { accuracyQuality, classifySample } from './sampleFilter';
 import {
   DEFAULT_ENGINE_CONFIG,
+  type BeaconScan,
   type CheckpointRuntime,
   type EngineCheckpoint,
   type EngineConfig,
@@ -28,7 +30,19 @@ function freshRuntime(atMs: number): CheckpointRuntime {
     exitNotified: false,
     lastDistanceM: null,
     lastInside: false,
+    lastInconclusive: null,
+    lastEvidence: null,
   };
+}
+
+/** Fields whose change invalidates a checkpoint's accumulated evidence. */
+function evidenceKey(cp: EngineCheckpoint): string {
+  return JSON.stringify([
+    cp.policy, cp.latitude, cp.longitude, cp.radiusM, cp.floor ?? null, cp.altitudeM ?? null,
+    cp.altitudeReference ?? null, cp.maxVerticalDifferenceM ?? null, cp.maxVerticalUncertaintyM ?? null,
+    cp.maxHorizontalAccuracyM ?? null, cp.expectedBeaconId ?? null, cp.minimumBeaconRssiDbm ?? null,
+    cp.requiredBeaconObservations ?? null,
+  ]);
 }
 
 /**
@@ -41,10 +55,11 @@ function freshRuntime(atMs: number): CheckpointRuntime {
  *   TRIGGERED|PLAYING --audio finished/failed/timeout--> COOLDOWN
  *   COOLDOWN --M consecutive confident-outside fixes, min time outside, cooldown elapsed--> OUTSIDE ('rearmed')
  *
- * "Inside" = good-accuracy fix with distance <= radius.
- * "Confidently outside" = distance > radius + hysteresis for a good fix, or
- *   distance - accuracy > radius + hysteresis for any fix with known accuracy
- *   (even a poor fix can prove you are far away).
+ * What counts as "inside", "confidently outside" etc. is decided per
+ * checkpoint by its positioning policy (src/engine/policy.ts) from GNSS fixes
+ * (process) and BLE scan windows (processBeaconScan). Inconclusive evidence
+ * never advances a checkpoint: e.g. an elevation checkpoint with no usable
+ * altitude, or a floor checkpoint whose floor cannot be determined.
  * Exit observations are counted during TRIGGERED/PLAYING too, so a user who
  * walks away mid-playback rearms as soon as playback ends.
  */
@@ -56,6 +71,9 @@ export class CheckpointEngine {
   private history: LocationSample[] = [];
   private consecutiveOutliers = 0;
   private lastQuality: SampleQuality | null = null;
+  private lastScan: BeaconScan | null = null;
+  private floorEstimate: number | null = null;
+  private floors = new Map<string, number>();
 
   constructor(config: Partial<EngineConfig> = {}) {
     this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
@@ -78,12 +96,7 @@ export class CheckpointEngine {
     for (const cp of list) {
       const prev = this.checkpoints.get(cp.id);
       const rt = this.runtime.get(cp.id);
-      const geometryChanged =
-        prev != null &&
-        (prev.latitude !== cp.latitude ||
-          prev.longitude !== cp.longitude ||
-          prev.radiusM !== cp.radiusM ||
-          prev.floor !== cp.floor);
+      const geometryChanged = prev != null && evidenceKey(prev) !== evidenceKey(cp);
       if (!rt) {
         this.runtime.set(cp.id, freshRuntime(atMs));
       } else if (geometryChanged && rt.state !== 'TRIGGERED' && rt.state !== 'PLAYING') {
@@ -91,6 +104,13 @@ export class CheckpointEngine {
       }
     }
     this.checkpoints = next;
+    this.floors = beaconFloorMap(list);
+  }
+
+  /** True when some active checkpoint needs BLE scans (callers start the scanner only then). */
+  needsBeaconScans(): boolean {
+    for (const cp of this.checkpoints.values()) if (isBlePolicy(cp)) return true;
+    return false;
   }
 
   getCheckpoints(): EngineCheckpoint[] {
@@ -128,11 +148,37 @@ export class CheckpointEngine {
     const events: EngineEvent[] = [];
     const t = sample.timestampMs;
     for (const cp of this.checkpoints.values()) {
-      this.observe(cp, sample, quality === 'good', t, events);
+      this.observe(cp, evaluateFix(cp, sample, this.config), t, events);
     }
     events.push(...this.applyTimeouts(nowMs));
     events.push(...this.fireReadyCandidates(t));
     return { quality, accepted: true, events };
+  }
+
+  /**
+   * Feed one BLE scan window. Stale, future or out-of-order windows are
+   * ignored. Only BLE-policy checkpoints are affected.
+   */
+  processBeaconScan(scan: BeaconScan, nowMs: number): { accepted: boolean; events: EngineEvent[] } {
+    if (
+      !Number.isFinite(scan.timestampMs) ||
+      nowMs - scan.timestampMs > this.config.maxSampleAgeMs ||
+      scan.timestampMs - nowMs > this.config.maxFutureSkewMs ||
+      (this.lastScan != null && scan.timestampMs <= this.lastScan.timestampMs)
+    ) {
+      return { accepted: false, events: this.applyTimeouts(nowMs) };
+    }
+    this.lastScan = scan;
+    this.floorEstimate = estimateFloor(scan.beacons, this.floors, this.config.floorRssiMarginDb);
+    const events: EngineEvent[] = [];
+    const t = scan.timestampMs;
+    for (const cp of this.checkpoints.values()) {
+      const ev = evaluateScan(cp, scan, this.floorEstimate, this.config);
+      if (ev) this.observe(cp, ev, t, events);
+    }
+    events.push(...this.applyTimeouts(nowMs));
+    events.push(...this.fireReadyCandidates(t));
+    return { accepted: true, events };
   }
 
   /** Advance time-based transitions when no fixes arrive (e.g. GPS signal lost). */
@@ -180,15 +226,19 @@ export class CheckpointEngine {
       return {
         id: cp.id,
         name: cp.name,
+        policy: cp.policy,
         state: rt.state,
         distanceM: rt.lastDistanceM,
         candidateCount: rt.candidateCount,
         inside: rt.lastInside,
+        waitingFor: rt.state === 'OUTSIDE' || rt.state === 'CANDIDATE' ? (rt.lastInconclusive ?? null) : null,
       };
     });
     return {
       lastQuality: this.lastQuality,
       lastSample: this.lastAccepted,
+      lastBeaconScan: this.lastScan,
+      floorEstimate: this.floorEstimate,
       lowConfidence: this.lastQuality === 'low_accuracy',
       activeCheckpointId: active,
       checkpoints,
@@ -208,6 +258,7 @@ export class CheckpointEngine {
       runtime,
       lastAccepted: this.lastAccepted,
       consecutiveOutliers: this.consecutiveOutliers,
+      lastBeaconScan: this.lastScan,
     };
   }
 
@@ -219,6 +270,7 @@ export class CheckpointEngine {
     }
     this.lastAccepted = snapshot.lastAccepted;
     this.consecutiveOutliers = snapshot.consecutiveOutliers;
+    this.lastScan = snapshot.lastBeaconScan ?? null;
   }
 
   reset(atMs = 0): void {
@@ -227,37 +279,22 @@ export class CheckpointEngine {
     this.history = [];
     this.consecutiveOutliers = 0;
     this.lastQuality = null;
+    this.lastScan = null;
+    this.floorEstimate = null;
   }
 
   // --- internals -----------------------------------------------------------
 
-  private observe(
-    cp: EngineCheckpoint,
-    sample: LocationSample,
-    good: boolean,
-    t: number,
-    events: EngineEvent[],
-  ): void {
+  private observe(cp: EngineCheckpoint, ev: Evidence, t: number, events: EngineEvent[]): void {
     const rt = this.runtime.get(cp.id)!;
-    const d = distanceM(cp, sample);
-    const exitRadius = cp.radiusM + this.config.exitHysteresisM;
-    const floorKnown = sample.floor != null && cp.floor != null;
-    const floorMismatch = floorKnown && sample.floor !== cp.floor;
-
-    const inside = good && d <= cp.radiusM && !floorMismatch && this.altitudeOk(cp, sample);
-    const confidentlyOutside =
-      floorMismatch ||
-      (good && d > exitRadius) ||
-      (sample.accuracyM != null && d - sample.accuracyM > exitRadius);
-    // A good fix inside the exit band is clear evidence the user has not left yet.
-    const clearlyNotOutside = good && d <= exitRadius && !floorMismatch;
-
-    rt.lastDistanceM = d;
-    rt.lastInside = inside;
+    if (ev.distanceM != null) rt.lastDistanceM = ev.distanceM;
+    rt.lastInside = ev.inside;
+    rt.lastInconclusive = ev.inconclusive;
+    if (ev.inside) rt.lastEvidence = ev.detail;
 
     switch (rt.state) {
       case 'OUTSIDE':
-        if (inside) {
+        if (ev.inside) {
           this.setState(rt, 'CANDIDATE', t);
           rt.candidateCount = 1;
           rt.candidateSinceMs = t;
@@ -265,39 +302,31 @@ export class CheckpointEngine {
         }
         break;
       case 'CANDIDATE':
-        if (inside) {
+        if (ev.inside) {
           rt.candidateCount++;
           rt.lastSupportMs = t;
-        } else if ((good && d > cp.radiusM) || confidentlyOutside) {
+        } else if (ev.breaksCandidate || ev.confidentlyOutside) {
           this.resetToOutside(rt, t);
         }
-        // Low-accuracy fixes that don't prove an exit neither add nor remove evidence.
+        // Inconclusive observations neither add nor remove evidence.
         break;
       case 'TRIGGERED':
       case 'PLAYING':
       case 'COOLDOWN':
-        if (confidentlyOutside) {
+        if (ev.confidentlyOutside) {
           if (rt.outsideCount === 0) rt.outsideSinceMs = t;
           rt.outsideCount++;
           if (!rt.exitNotified) {
             rt.exitNotified = true;
             events.push({ type: 'exit', checkpointId: cp.id, atMs: t });
           }
-        } else if (clearlyNotOutside) {
+        } else if (ev.clearlyNotOutside) {
           rt.outsideCount = 0;
           rt.outsideSinceMs = null;
         }
         if (rt.state === 'COOLDOWN') this.tryRearm(cp.id, rt, t, events);
         break;
     }
-  }
-
-  private altitudeOk(cp: EngineCheckpoint, sample: LocationSample): boolean {
-    const tol = this.config.altitudeToleranceM;
-    if (tol == null || cp.altitudeM == null || sample.altitudeM == null) return true;
-    // Without a vertical accuracy estimate GNSS altitude is not meaningful enough to reject on.
-    if (sample.altitudeAccuracyM == null) return true;
-    return Math.abs(sample.altitudeM - cp.altitudeM) <= tol + sample.altitudeAccuracyM;
   }
 
   private tryRearm(id: string, rt: CheckpointRuntime, t: number, events: EngineEvent[]): void {
@@ -331,10 +360,10 @@ export class CheckpointEngine {
     return events;
   }
 
-  private isReady(rt: CheckpointRuntime, atMs: number): boolean {
+  private isReady(cp: EngineCheckpoint, rt: CheckpointRuntime, atMs: number): boolean {
     return (
       rt.state === 'CANDIDATE' &&
-      rt.candidateCount >= this.config.entryConfirmSamples &&
+      rt.candidateCount >= requiredObservations(cp, this.config) &&
       rt.candidateSinceMs != null &&
       rt.lastSupportMs != null &&
       rt.lastSupportMs - rt.candidateSinceMs >= this.config.entryDwellMs &&
@@ -360,7 +389,7 @@ export class CheckpointEngine {
 
   private fireReadyCandidates(atMs: number): EngineEvent[] {
     const ready = [...this.checkpoints.values()]
-      .filter((cp) => this.isReady(this.runtime.get(cp.id)!, atMs))
+      .filter((cp) => this.isReady(cp, this.runtime.get(cp.id)!, atMs))
       .sort((a, b) => this.compare(a, b));
     if (ready.length === 0) return [];
 
@@ -376,12 +405,14 @@ export class CheckpointEngine {
       rt.outsideCount = 0;
       rt.outsideSinceMs = null;
       rt.exitNotified = false;
+      const ble = isBlePolicy(cp);
       return {
         type: 'trigger' as const,
         checkpointId: cp.id,
         atMs,
-        distanceM: rt.lastDistanceM ?? 0,
-        accuracyM: this.lastAccepted?.accuracyM ?? null,
+        distanceM: ble ? null : rt.lastDistanceM,
+        accuracyM: ble ? null : (this.lastAccepted?.accuracyM ?? null),
+        evidence: rt.lastEvidence ?? '',
       };
     });
   }
@@ -392,7 +423,7 @@ export class CheckpointEngine {
   }
 
   private resetToOutside(rt: CheckpointRuntime, atMs: number): void {
-    const { lastDistanceM, lastInside } = rt;
-    Object.assign(rt, freshRuntime(atMs), { lastDistanceM, lastInside });
+    const { lastDistanceM, lastInside, lastInconclusive } = rt;
+    Object.assign(rt, freshRuntime(atMs), { lastDistanceM, lastInside, lastInconclusive });
   }
 }

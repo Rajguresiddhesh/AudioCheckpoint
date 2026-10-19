@@ -88,11 +88,11 @@ The original spec targeted Kotlin/Compose. These are the equivalents used here:
 index.ts                      entry: registers the background location task, then Expo Router
 app.json / eas.json           Expo config (permissions, plugins) / cloud build profiles
 src/app/                      screens (Expo Router): index, map, creator, checkpoint/[id], audio, packages, status, settings
-src/engine/                   PURE: geo, sample filter, state machine, validation, simulator, timestamps (+ tests)
+src/engine/                   PURE: geo, sample filter, positioning policies, beacon parsing/floors, state machine, validation, simulator (+ tests)
 src/audio/                    AudioManager (pure) + expo backend, melody synth (pure), import/validation
 src/data/                     migrations, models, repositories, seed, expo-sqlite adapter (+ tests on sql.js)
 src/tracking/                 TrackingController (pure) + runtime singleton (+ end-to-end tests)
-src/location/                 expo-location adapter, foreground service, simulator driver, PositionSource interface
+src/location/                 expo-location adapter, foreground service, BLE beacon scanner, simulator driver
 src/map/                      MapLibre view, schematic fallback, offline pack management, GeoJSON helpers
 src/ui/                       components, hooks, formatting
 .maestro/                     device UI flows
@@ -147,6 +147,8 @@ npx eas-cli@latest build -p android --profile development  # dev client APK
 | `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | Detect checkpoints. **Precise** is required (approximate cannot resolve 20 m) | On "Start tracking" / opening Creator Mode |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION` | Keep GPS running with the screen off, with a persistent notification | Install-time (normal permission) |
 | `POST_NOTIFICATIONS` (Android 13+) | Show that notification in the shade (tracking works without it) | On "Start tracking" |
+| `BLUETOOTH_SCAN` (Android 12+, "Nearby devices") | Hear indoor beacons. Declared **without** `neverForLocation`, because beacon results are used for positioning and Android would otherwise filter them | On "Start tracking" when a beacon checkpoint exists, or *Scan for nearby beacons* |
+| `BLUETOOTH`, `BLUETOOTH_ADMIN`, `BLUETOOTH_CONNECT` | Added by react-native-ble-plx (legacy scanning on Android ≤ 11); the app never connects to devices | Install-time |
 | `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `MODIFY_AUDIO_SETTINGS` | Added by expo-audio for background playback | Install-time |
 | `INTERNET` | **Only** for downloading an offline map / online map view | Install-time |
 | `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK` | Required by expo-task-manager, which hands each location fix to JS through a persisted JobScheduler job. Without it Android throws and the app crashes on the first fix | Install-time |
@@ -197,6 +199,32 @@ User-Agent); for heavy use, switch to a commercial tile provider in `src/map/Lea
 3. **Simulate a walk:** in User Mode, with tracking stopped, plays a synthetic walk through all enabled checkpoints using the real
    engine and audio. Use it to demo without walking.
 
+### Positioning policies (per checkpoint)
+Each checkpoint says how it is detected. **Latitude/longitude alone never triggers a checkpoint that needs more evidence.**
+If the extra evidence is missing or untrustworthy, the result is *inconclusive*: nothing plays, and User Mode and
+*Permissions & status* show why (e.g. "waiting for beacon", "vertical accuracy unknown").
+
+| Policy (editor label) | Use for | Triggers only when |
+|---|---|---|
+| `OUTDOOR_GPS` (GPS) | Gardens, campuses, flat outdoor spots | Good GPS fix inside the radius (optional per-checkpoint accuracy limit). Floor/altitude are ignored, so this must be chosen explicitly. |
+| `OUTDOOR_ELEVATION` (GPS + altitude) | Hills, forts, viewpoints, stacked paths | Horizontal check **and** a fix with altitude in the **same datum**, vertical accuracy ≤ the checkpoint's limit, and \|Δaltitude\| ≤ the allowed difference. |
+| `INDOOR_BLE` (Indoor beacon) | Rooms, museum exhibits | The checkpoint's beacon is heard at ≥ its minimum RSSI in N consecutive 2 s scan windows. GPS neither triggers nor rearms it. |
+| `INDOOR_BLE_FLOOR` (Indoor beacon + floor) | Multi-floor buildings (same lat/lon on every floor) | As above **and** the strongest known beacon places the user on this floor, beating other floors' beacons by a margin (default 3 dB). Ambiguous floor = no trigger. |
+
+* **Altitude datums are never mixed.** Android GNSS reports height above the WGS84 **ellipsoid**; maps and iOS use **mean sea
+  level**. Near Thane these differ by tens of metres and the app has no geoid model, so a checkpoint in a different datum than
+  the phone's is inconclusive (the editor warns). Capture the altitude on site with *Use my current position*, which also
+  records its datum. Android's "no altitude" fixes (altitude 0, vertical accuracy 0) are treated as having no altitude.
+* **Beacon ids:** `ibeacon:<uuid>:<major>:<minor>`, `eddystone:<namespace>:<instance>` (Eddystone-UID) or `mac:<address>`.
+  In the editor, *Scan for nearby beacons* lists what the phone hears; tapping one fills the id and a minimum RSSI 8 dB below
+  the signal at that spot. A beacon belongs to one floor (the editor refuses to reuse it on another floor). The floor map is
+  built from the checkpoints themselves.
+* **Leaving:** GPS: beyond radius + hysteresis. Elevation: also when the altitude differs by more than the allowed difference
+  + 5 m after subtracting the reported uncertainty. Beacon: not heard, or 6 dB below the minimum. Floor: beacons place you on
+  another floor. Margins are in *Settings → Elevation and indoor checkpoints*.
+* Beacon scanning runs only while tracking **and** some enabled checkpoint uses a beacon policy.
+* *Simulate a walk* also simulates altitude (near elevation checkpoints) and beacons (inside beacon checkpoints) for demos.
+
 ### Default detection rules (all configurable in Settings)
 * A fix is usable to **trigger** only if accuracy ≤ 25 m, it is ≤ 20 s old, newer than the last fix, and not an implausible
   jump (> 15 m/s after subtracting accuracies).
@@ -209,10 +237,12 @@ User-Agent); for heavy use, switch to a commercial tile provider in `src/map/Lea
 ## 7. Testing
 
 ### Automated (executed here)
-`npm test` ran 8 suites with **96 tests, all passing** (Jest 29, Node 24, 2026-10-17). `tsc --noEmit`, `expo lint` and
-`expo-doctor` (21/21) were clean, and `expo export --platform android` bundled successfully. A native release APK was then
-built locally with Gradle (JDK 17, Android SDK 36) and its signature verified. **No device run or Maestro flow has been
-executed yet.**
+`npm test` runs 9 suites with **139 tests, all passing** (Jest 29, 2026-10-20); `tsc --noEmit` and `expo lint` are clean.
+The policy tests were mutation-checked: re-introducing the old "fall back to lat/lon when altitude/floor is unknown"
+behaviour makes 7 of them fail. A release APK was built and run on an Android 15 emulator (GPS via `geo fix`; the emulator
+has no real beacons): v1 → v2 upgrade with existing data, beacon scan + permission prompt, "waiting for beacon" while GPS
+sat on the checkpoint's exact lat/lon, and a beacon + floor trigger during *Simulate a walk*. **Not yet tested with real
+beacons, real altitude in hilly terrain, or a physical phone.** Maestro flows have not been run.
 
 | Spec test | Where |
 |---|---|
@@ -224,7 +254,10 @@ executed yet.**
 | 11 Interruption & recovery | `trackingController.test.ts` › interruption and recovery (new controller on the same DB) |
 | 12 Offline operation | `trackingController.test.ts` › offline (full session with `fetch`, XHR and WebSocket throwing, plus a static scan of core modules) |
 | Simulated movement | `src/engine/simulator.ts`, used by the engine and controller tests and the in-app *Simulate a walk* |
-| Migrations, rollback, newer-DB refusal | `repositories.test.ts` |
+| Migrations, rollback, newer-DB refusal, v1 → v2 upgrade keeps data | `repositories.test.ts` |
+| Positioning policies (elevation datum/uncertainty, beacon RSSI/observations, floors, lat/lon-only never triggers) | `checkpointEngine.test.ts` › positioning policies |
+| iBeacon / Eddystone parsing, floor estimation | `src/engine/__tests__/beacons.test.ts` |
+| Same lat/lon on two floors, end to end with SQLite + audio | `trackingController.test.ts` › mixed indoor + outdoor |
 
 Device UI flows (not executed): `maestro test .maestro/` against an installed build.
 
@@ -249,18 +282,28 @@ Preparation (at home, online): install the APK, open *Offline maps* → download
     session resumed; no replay while still inside.
 11. **Permission revocation:** while tracking, revoke location in system settings. The app should stop receiving fixes and
     show an error, without crashing. Re-grant and start again.
-12. **History:** *Permissions & status* → trigger history should list each play with distance and accuracy.
+12. **History:** *Permissions & status* → trigger history should list each play with its evidence.
+13. **Elevation (on a hill or fort):** create a *GPS + altitude* checkpoint at the top with *Use my current position*.
+    Walk below it on the same lat/lon (e.g. a road under a viewpoint): it must not play. At the top it plays once the
+    vertical accuracy is within the limit.
+14. **Indoor floors:** place one beacon per floor, create a *beacon + floor* checkpoint per floor at the same spot (use *Scan
+    for nearby beacons* on each floor). Stand on each floor and on the stairs: only that floor's checkpoint plays, and the
+    stairs stay "floor cannot be determined". Note RSSI and delay per phone.
 
 Record per step: phone model and Android version, reported accuracy, distance at trigger, and delay.
 
-## 8. Data model (SQLite, schema v1)
-* `checkpoints`: id, name (unique, case-insensitive), latitude, longitude, trigger_radius_m, audio_uri
-  (`melody:<id>` or an app-private `file://` copy), audio_label, enabled, priority, floor?, altitude_m?, coordinates_verified,
-  created_at, updated_at.
+## 8. Data model (SQLite, schema v2)
+* `checkpoints`: id, name (unique, case-insensitive), positioning_policy (`OUTDOOR_GPS|OUTDOOR_ELEVATION|INDOOR_BLE|
+  INDOOR_BLE_FLOOR`, CHECK), latitude, longitude, trigger_radius_m, max_horizontal_accuracy_m?, audio_uri (`melody:<id>` or an
+  app-private `file://` copy), audio_label, enabled, priority, floor?, altitude_m?, altitude_reference?
+  (`ELLIPSOID|MSL|BAROMETRIC_RELATIVE`), max_vertical_difference_m?, max_vertical_uncertainty_m?, expected_beacon_id?,
+  minimum_beacon_rssi_dbm?, required_beacon_observations?, coordinates_verified, created_at, updated_at.
+* v1 → v2 only adds columns: existing checkpoints become `OUTDOOR_GPS` (their previous behaviour) and existing altitudes are
+  marked `ELLIPSOID` (v1 could only capture them from Android GNSS).
 * `map_packages`: id, name, local_path, offline_pack_id, style_url, west, south, east, north, min/max zoom,
   download_status (`pending|downloading|complete|incomplete|failed|missing`), progress, size, verified_at, error, created_at.
 * `trigger_history`: id, checkpoint_id → checkpoints (CASCADE), session_id → tracking_sessions, triggered_at,
-  playback_status, distance_m, accuracy_m.
+  playback_status, distance_m (null for beacon triggers), accuracy_m, evidence (what triggered it).
 * `tracking_sessions`: id, started_at, ended_at, source, engine_snapshot (JSON), updated_at.
 * `settings`: key/value.
 
@@ -278,7 +321,15 @@ database written by a newer app version.
   your responsibility to license.
 
 ## 10. Known limitations
-* **Not yet run on a device.** Background playback with the screen off, OEM battery killers (Xiaomi, Oppo, Vivo, Samsung "deep
+* **Indoor and elevation detection are not field-tested yet** (emulator and unit tests only). Expect to tune minimum RSSI and
+  observations per building; walls, bodies and phone models shift RSSI by 10 dB or more.
+* With the screen off, Android stops delivering *unfiltered* BLE scan results. When all beacon checkpoints use Eddystone ids
+  the app scans with the Eddystone service filter, which keeps working in the pocket; **iBeacon/MAC checkpoints need the screen
+  on** (or Eddystone beacons).
+* No geoid model: ellipsoid and mean-sea-level altitudes cannot be converted, so mismatched checkpoints never trigger (by
+  design). Barometric relative height and QR/NFC checkpoints are not implemented.
+* Phone GNSS altitude is typically ±5–15 m; elevation checkpoints separate levels tens of metres apart, not floors.
+* Background playback with the screen off, OEM battery killers (Xiaomi, Oppo, Vivo, Samsung "deep
   sleep") and Doze behaviour must be verified with §7. Some phones need the app exempted from battery optimisation.
 * Requires Google Play Services (Fused Location Provider via expo-location). There is no raw `LocationManager` fallback for
   Play-Services-free devices.
@@ -286,12 +337,13 @@ database written by a newer app version.
   restarts automatically). This is an Android restriction on starting location foreground services from the background.
 * Offline map download is limited to the configured park bounds. Imported `.db` packs appear only after an app restart, and
   must share the configured style URL.
-* GPS cannot tell floors apart. `floor` and the BLE interface are placeholders for a future indoor source.
 * Phone GPS under tree cover is often 10–30 m; very small radii (< 10 m) will be unreliable.
 * No iOS testing (the code is mostly cross-platform, but background modes are configured for Android only).
 
 ## 11. Future improvements
-* BLE beacon `PositionSource` (floor-aware, indoor museums and forts) and barometer-based relative elevation.
+* Barometer-based relative elevation (calibrated at a reference point), an offline geoid grid for ellipsoid ↔ MSL, and
+  QR/NFC checkpoints.
+* Native BLE scanning with hardware filters for iBeacon so screen-off scanning works without Eddystone.
 * Sensor fusion / pedestrian dead reckoning to bridge GPS gaps.
 * Draw or select the download area on the map; export and import checkpoint sets (JSON) with their audio.
 * Per-checkpoint playback options (volume, loop, play-once-ever) and lock-screen controls.

@@ -3,13 +3,13 @@
     "name": "Audio Checkpoints",
     "slug": "audio-checkpoint-map",
     "scheme": "audiocheckpoints",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "android": {
       "package": "com.isl.audiocheckpoints",
-      "versionCode": 2,
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -56,7 +56,15 @@
       ],
       "@maplibre/maplibre-react-native",
       "expo-asset",
-      "expo-font"
+      "expo-font",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "neverForLocation": false,
+          "bluetoothAlwaysPermission": "Audio Checkpoints scans for Bluetooth beacons to detect indoor checkpoints."
+        }
+      ]
     ]
   }
 }

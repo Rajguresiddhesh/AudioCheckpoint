@@ -31,6 +31,9 @@ const LIMITS: Record<string, [number, number]> = {
   cooldownMs: [0, 3_600_000],
   maxSampleAgeMs: [2000, 120_000],
   candidateTimeoutMs: [5000, 600_000],
+  verticalExitHysteresisM: [0, 50],
+  beaconExitHysteresisDb: [0, 30],
+  floorRssiMarginDb: [0, 20],
 };
 
 export default function SettingsScreen() {
@@ -44,7 +47,6 @@ export default function SettingsScreen() {
     const t: Record<string, string> = {};
     for (const k of ['defaultRadiusM', 'saveAccuracyThresholdM', 'duplicateDistanceM', 'locationIntervalMs'] as NumKey[]) t[k] = String(v[k]);
     for (const k of Object.keys(LIMITS)) if (k in v.engine) t[k] = String(v.engine[k as EngineNumKey]);
-    t.altitudeToleranceM = v.engine.altitudeToleranceM == null ? '' : String(v.engine.altitudeToleranceM);
     setText(t);
   };
 
@@ -75,12 +77,6 @@ export default function SettingsScreen() {
       }
       if (key in next.engine) (next.engine as unknown as Record<string, number>)[key] = v;
       else (next as unknown as Record<string, number>)[key] = v;
-    }
-    const alt = text.altitudeToleranceM?.trim() ?? '';
-    next.engine.altitudeToleranceM = alt === '' ? null : parseNumber(alt);
-    if (alt !== '' && (next.engine.altitudeToleranceM == null || next.engine.altitudeToleranceM < 0)) {
-      setMessage({ tone: 'bad', text: 'Altitude tolerance must be blank or a positive number.' });
-      return;
     }
     await services.settings.save(next);
     await services.controller.reloadCheckpoints(); // also reloads engine config + playback policy
@@ -146,19 +142,21 @@ export default function SettingsScreen() {
         {num('maxSampleAgeMs', 'Reject fixes older than (ms)')}
         {num('candidateTimeoutMs', 'Forget partial entry after GPS loss (ms)')}
         {num('locationIntervalMs', 'GPS interval while tracking (ms)', 'Shorter = more responsive, more battery.')}
-        <Field
-          label="Altitude tolerance (m, blank = off)"
-          hint="Only for checkpoints with an altitude. GPS altitude is rough; never use it to separate floors."
-          value={text.altitudeToleranceM ?? ''}
-          onChangeText={(v) => setText((t) => ({ ...t, altitudeToleranceM: v }))}
-          keyboardType="numeric"
-        />
         <Toggle
           label="Accept mock locations"
           hint="Needed for location-spoofing test apps; turn off for real visits."
           value={s.engine.allowMockLocations}
           onValueChange={(v) => setS({ ...s, engine: { ...s.engine, allowMockLocations: v } })}
         />
+      </Card>
+
+      <Card title="Elevation and indoor checkpoints">
+        <Muted>
+          Altitude limits, beacons and floors are set per checkpoint. These control how the app decides you have left.
+        </Muted>
+        {num('verticalExitHysteresisM', 'Vertical exit margin (m)', 'Elevation checkpoints: extra height difference needed to count as having left.')}
+        {num('beaconExitHysteresisDb', 'Beacon exit margin (dB)', 'Indoor checkpoints: signal this far below the minimum, or not heard, counts as having left.')}
+        {num('floorRssiMarginDb', 'Floor decision margin (dB)', 'The strongest beacon must beat beacons on other floors by this much, otherwise the floor is unknown.')}
       </Card>
 
       <Card title="Overlapping checkpoints">

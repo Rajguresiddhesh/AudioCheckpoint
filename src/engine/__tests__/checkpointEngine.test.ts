@@ -2,7 +2,7 @@ import { checkpointAt, fixNear } from '../../testing/helpers';
 import { CheckpointEngine } from '../checkpointEngine';
 import { destinationPoint } from '../geo';
 import { simulateRoute } from '../simulator';
-import type { EngineConfig, EngineEvent, LocationSample } from '../types';
+import type { BeaconScan, EngineConfig, EngineEvent, LocationSample } from '../types';
 
 const T0 = 1_700_000_000_000;
 
@@ -377,40 +377,205 @@ describe('overlapping checkpoints', () => {
   });
 });
 
-describe('floor and altitude (future positioning hooks)', () => {
-  it('a floor-tagged fix on another floor never triggers', () => {
-    const cp = checkpointAt('gallery', 0, 0, { floor: 2 });
-    const e = makeEngine();
-    e.setCheckpoints([cp]);
-    const ev = feed(e, [
-      fixNear(cp, 1, T0, { extra: { floor: 1 } }),
-      fixNear(cp, 1, T0 + 1000, { extra: { floor: 1 } }),
-    ]);
-    expect(triggers(ev)).toHaveLength(0);
-    const ev2 = feed(e, [
-      fixNear(cp, 1, T0 + 2000, { extra: { floor: 2 } }),
-      fixNear(cp, 1, T0 + 3000, { extra: { floor: 2 } }),
-    ]);
-    expect(triggers(ev2)).toHaveLength(1);
+describe('positioning policies: lat/lon alone never triggers when more evidence is required', () => {
+  const BEACON = 'ibeacon:f7826da6-4fa2-4e98-8024-bc5b71e0893e:1:2';
+  const OTHER_FLOOR_BEACON = 'ibeacon:f7826da6-4fa2-4e98-8024-bc5b71e0893e:1:1';
+  const scan = (t: number, beacons: [string, number][]): BeaconScan => ({
+    timestampMs: t,
+    beacons: beacons.map(([id, rssiDbm]) => ({ id, rssiDbm })),
+  });
+  const feedScans = (e: CheckpointEngine, scans: BeaconScan[]) =>
+    scans.flatMap((s) => e.processBeaconScan(s, s.timestampMs).events);
+
+  describe('OUTDOOR_ELEVATION', () => {
+    const summit = checkpointAt('summit', 0, 0, {
+      policy: 'OUTDOOR_ELEVATION',
+      altitudeM: 500,
+      altitudeReference: 'ELLIPSOID',
+      maxVerticalDifferenceM: 10,
+      maxVerticalUncertaintyM: 15,
+    });
+    const at = (alt: number | null, va: number | null, ref: LocationSample['altitudeReference'] = 'ELLIPSOID') => ({
+      extra: { altitudeM: alt, altitudeAccuracyM: va, altitudeReference: ref },
+    });
+
+    it('triggers when horizontal and vertical evidence both agree', () => {
+      const e = makeEngine();
+      e.setCheckpoints([summit]);
+      const ev = feed(e, [fixNear(summit, 3, T0, at(504, 5)), fixNear(summit, 3, T0 + 1000, at(503, 5))]);
+      expect(triggers(ev)).toEqual([expect.objectContaining({ evidence: expect.stringContaining('altitude') })]);
+    });
+
+    it.each([
+      ['no altitude', at(null, 5)],
+      ['unknown vertical accuracy', at(500, null)],
+      ["Android's zero vertical accuracy (= no altitude)", at(500, 0)],
+      ['vertical accuracy worse than allowed', at(500, 30)],
+      ['unknown altitude reference', at(500, 5, null)],
+      ['incompatible altitude reference (MSL fix, ellipsoid checkpoint)', at(500, 5, 'MSL')],
+    ])('does not trigger with %s, even standing on the exact lat/lon', (_label, opts) => {
+      const e = makeEngine();
+      e.setCheckpoints([summit]);
+      const ev = feed(e, Array.from({ length: 10 }, (_, i) => fixNear(summit, 0, T0 + i * 1000, opts)));
+      expect(triggers(ev)).toHaveLength(0);
+      expect(e.getStatus().checkpoints[0].waitingFor).not.toBeNull();
+    });
+
+    it('does not trigger at the same lat/lon on a different level (e.g. the road below a viewpoint)', () => {
+      const e = makeEngine();
+      e.setCheckpoints([summit]);
+      const ev = feed(e, Array.from({ length: 10 }, (_, i) => fixNear(summit, 0, T0 + i * 1000, at(470, 5))));
+      expect(triggers(ev)).toHaveLength(0);
+    });
+
+    it('a clearly different altitude counts as leaving, so the checkpoint rearms', () => {
+      const e = makeEngine({ rearmOutsideSamples: 2 });
+      e.setCheckpoints([summit]);
+      feed(e, [fixNear(summit, 0, T0, at(500, 5)), fixNear(summit, 0, T0 + 1000, at(500, 5))]);
+      e.markPlaybackFinished('summit', T0 + 1500);
+      const out = feed(e, [fixNear(summit, 0, T0 + 2000, at(460, 5)), fixNear(summit, 0, T0 + 3000, at(460, 5))]);
+      expect(out.map((x) => x.type)).toEqual(['exit', 'rearmed']);
+    });
   });
 
-  it('GNSS fixes without floor info ignore the checkpoint floor', () => {
-    const cp = checkpointAt('gallery', 0, 0, { floor: 2 });
-    const e = makeEngine();
-    e.setCheckpoints([cp]);
-    expect(triggers(feed(e, [fixNear(cp, 1, T0), fixNear(cp, 1, T0 + 1000)]))).toHaveLength(1);
+  describe('OUTDOOR_GPS', () => {
+    it('ignores altitude and floor fields (GPS-only must be chosen explicitly)', () => {
+      const cp = checkpointAt('gate', 0, 0, { policy: 'OUTDOOR_GPS', floor: 3, altitudeM: 900 });
+      const e = makeEngine();
+      e.setCheckpoints([cp]);
+      expect(triggers(feed(e, [fixNear(cp, 2, T0), fixNear(cp, 2, T0 + 1000)]))).toHaveLength(1);
+    });
+
+    it('honours a per-checkpoint horizontal accuracy limit', () => {
+      const cp = checkpointAt('gate', 0, 0, { maxHorizontalAccuracyM: 8 });
+      const e = makeEngine({ maxAccuracyM: 25 });
+      e.setCheckpoints([cp]);
+      const poor = { accuracyM: 12 };
+      expect(triggers(feed(e, [fixNear(cp, 2, T0, poor), fixNear(cp, 2, T0 + 1000, poor)]))).toHaveLength(0);
+      expect(triggers(feed(e, [fixNear(cp, 2, T0 + 2000), fixNear(cp, 2, T0 + 3000)]))).toHaveLength(1);
+    });
   });
 
-  it('altitude gating applies only when enabled and the fix has vertical accuracy', () => {
-    const cp = checkpointAt('summit', 0, 0, { altitudeM: 500 });
-    const low = { altitudeM: 400, altitudeAccuracyM: 5 };
-    const e = makeEngine({ altitudeToleranceM: 15 });
+  describe('INDOOR_BLE', () => {
+    const room = checkpointAt('room', 0, 0, {
+      policy: 'INDOOR_BLE',
+      expectedBeaconId: BEACON,
+      minimumBeaconRssiDbm: -70,
+      requiredBeaconObservations: 3,
+    });
+
+    it('GPS fixes at the exact lat/lon never trigger it', () => {
+      const e = makeEngine();
+      e.setCheckpoints([room]);
+      const ev = feed(e, Array.from({ length: 10 }, (_, i) => fixNear(room, 0, T0 + i * 1000)));
+      expect(triggers(ev)).toHaveLength(0);
+      expect(e.getStatus().checkpoints[0].waitingFor).toMatch(/beacon/);
+    });
+
+    it('triggers after the required number of strong beacon observations', () => {
+      const e = makeEngine();
+      e.setCheckpoints([room]);
+      expect(triggers(feedScans(e, [scan(T0, [[BEACON, -60]]), scan(T0 + 2000, [[BEACON, -62]])]))).toHaveLength(0);
+      const ev = feedScans(e, [scan(T0 + 4000, [[BEACON, -61]])]);
+      expect(triggers(ev)).toEqual([expect.objectContaining({ checkpointId: 'room', distanceM: null })]);
+    });
+
+    it('a weak beacon (e.g. heard through a wall) does not count', () => {
+      const e = makeEngine();
+      e.setCheckpoints([room]);
+      const ev = feedScans(e, Array.from({ length: 10 }, (_, i) => scan(T0 + i * 2000, [[BEACON, -80]])));
+      expect(triggers(ev)).toHaveLength(0);
+    });
+
+    it('a missed window breaks the run of observations', () => {
+      const e = makeEngine();
+      e.setCheckpoints([room]);
+      const ev = feedScans(e, [
+        scan(T0, [[BEACON, -60]]),
+        scan(T0 + 2000, [[BEACON, -60]]),
+        scan(T0 + 4000, []),
+        scan(T0 + 6000, [[BEACON, -60]]),
+      ]);
+      expect(triggers(ev)).toHaveLength(0);
+    });
+
+    it('does not replay while the beacon stays strong; rearms after it fades', () => {
+      const e = makeEngine({ rearmOutsideSamples: 2 });
+      e.setCheckpoints([room]);
+      feedScans(e, [0, 1, 2].map((i) => scan(T0 + i * 2000, [[BEACON, -60]])));
+      e.markPlaybackFinished('room', T0 + 4500);
+      const stay = feedScans(e, Array.from({ length: 10 }, (_, i) => scan(T0 + 6000 + i * 2000, [[BEACON, -60]])));
+      expect(triggers(stay)).toHaveLength(0);
+      const leave = feedScans(e, [scan(T0 + 30_000, []), scan(T0 + 32_000, [[BEACON, -90]])]);
+      expect(leave.map((x) => x.type)).toEqual(['exit', 'rearmed']);
+    });
+
+    it('ignores stale and out-of-order scan windows', () => {
+      const e = makeEngine();
+      e.setCheckpoints([room]);
+      expect(e.processBeaconScan(scan(T0, [[BEACON, -60]]), T0 + 60_000).accepted).toBe(false);
+      e.processBeaconScan(scan(T0 + 5000, [[BEACON, -60]]), T0 + 5000);
+      expect(e.processBeaconScan(scan(T0 + 4000, [[BEACON, -60]]), T0 + 5000).accepted).toBe(false);
+    });
+  });
+
+  describe('INDOOR_BLE_FLOOR: same lat/lon on different floors', () => {
+    // Two galleries stacked on top of each other: identical coordinates.
+    const g1 = checkpointAt('gallery-1', 0, 0, {
+      policy: 'INDOOR_BLE_FLOOR', floor: 1, expectedBeaconId: OTHER_FLOOR_BEACON, minimumBeaconRssiDbm: -75, requiredBeaconObservations: 2,
+    });
+    const g2 = checkpointAt('gallery-2', 0, 0, {
+      policy: 'INDOOR_BLE_FLOOR', floor: 2, expectedBeaconId: BEACON, minimumBeaconRssiDbm: -75, requiredBeaconObservations: 2,
+    });
+
+    it('only the checkpoint on the floor the beacons place the user on triggers', () => {
+      const e = makeEngine({ overlapPolicy: 'independent' });
+      e.setCheckpoints([g1, g2]);
+      // On floor 2: its beacon is strong; floor 1's beacon leaks through the slab at -72 dBm.
+      const ev = feedScans(e, [
+        scan(T0, [[BEACON, -58], [OTHER_FLOOR_BEACON, -72]]),
+        scan(T0 + 2000, [[BEACON, -59], [OTHER_FLOOR_BEACON, -71]]),
+      ]);
+      expect(triggers(ev).map((t) => t.checkpointId)).toEqual(['gallery-2']);
+      expect(e.getStatus().floorEstimate).toBe(2);
+    });
+
+    it('stays inconclusive when the floor is ambiguous (stairwell between floors)', () => {
+      const e = makeEngine({ overlapPolicy: 'independent' });
+      e.setCheckpoints([g1, g2]);
+      const ev = feedScans(e, Array.from({ length: 6 }, (_, i) =>
+        scan(T0 + i * 2000, [[BEACON, -65], [OTHER_FLOOR_BEACON, -66]]),
+      ));
+      expect(triggers(ev)).toHaveLength(0);
+      expect(e.getStatus().floorEstimate).toBeNull();
+    });
+
+    it('GPS fixes on the shared lat/lon trigger neither floor', () => {
+      const e = makeEngine({ overlapPolicy: 'independent' });
+      e.setCheckpoints([g1, g2]);
+      const ev = feed(e, Array.from({ length: 10 }, (_, i) => fixNear(g1, 0, T0 + i * 1000, { extra: { floor: 2 } })));
+      expect(triggers(ev)).toHaveLength(0);
+    });
+
+    it('outdoor checkpoints are unaffected by beacon scans', () => {
+      const out = checkpointAt('gate', 0, 0);
+      const e = makeEngine();
+      e.setCheckpoints([out, g2]);
+      const ev = feedScans(e, Array.from({ length: 4 }, (_, i) => scan(T0 + i * 2000, [[BEACON, -50]])));
+      expect(triggers(ev).map((t) => t.checkpointId)).toEqual(['gallery-2']);
+      expect(e.getRuntime('gate')!.state).toBe('OUTSIDE');
+    });
+  });
+
+  it('changing a checkpoint policy discards evidence gathered under the old one', () => {
+    const cp = checkpointAt('x', 0, 0, { requiredBeaconObservations: 2 });
+    const e = makeEngine({ entryConfirmSamples: 3 });
     e.setCheckpoints([cp]);
-    expect(triggers(feed(e, [fixNear(cp, 1, T0, { extra: low }), fixNear(cp, 1, T0 + 1000, { extra: low })]))).toHaveLength(0);
-    const noVa = { altitudeM: 400, altitudeAccuracyM: null };
-    expect(
-      triggers(feed(e, [fixNear(cp, 1, T0 + 2000, { extra: noVa }), fixNear(cp, 1, T0 + 3000, { extra: noVa })])),
-    ).toHaveLength(1);
+    feed(e, [fixNear(cp, 1, T0), fixNear(cp, 1, T0 + 1000)]);
+    expect(e.getRuntime('x')!.state).toBe('CANDIDATE');
+    e.setCheckpoints([{ ...cp, policy: 'INDOOR_BLE', expectedBeaconId: BEACON }], T0 + 1500);
+    expect(e.getRuntime('x')!.state).toBe('OUTSIDE');
+    expect(triggers(feed(e, [fixNear(cp, 1, T0 + 2000)]))).toHaveLength(0);
   });
 });
 

@@ -21,6 +21,7 @@ export async function seedIfFirstRun(
     await checkpoints.save(
       {
         name: seed.name,
+        positioningPolicy: 'OUTDOOR_GPS',
         latitude: p.latitude,
         longitude: p.longitude,
         triggerRadiusM: s.defaultRadiusM,

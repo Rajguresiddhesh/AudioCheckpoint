@@ -2,7 +2,7 @@ import type { AudioManager, AudioRequest, AudioState, FinishReason } from '../au
 import type { AppSettings } from '../config/settings';
 import type { Checkpoint, PlaybackStatus, TrackingSession } from '../data/models';
 import type { CheckpointEngine } from '../engine/checkpointEngine';
-import type { EngineEvent, EngineSnapshot, EngineStatus, LocationSample } from '../engine/types';
+import type { BeaconScan, EngineEvent, EngineSnapshot, EngineStatus, LocationSample } from '../engine/types';
 
 export const PREVIEW_PREFIX = 'preview:';
 
@@ -30,6 +30,7 @@ export interface TrackingDeps {
       playbackStatus: PlaybackStatus;
       distanceM: number | null;
       accuracyM: number | null;
+      evidence: string | null;
     }): Promise<number>;
     updateStatus(id: number, status: PlaybackStatus): Promise<void>;
   };
@@ -155,6 +156,32 @@ export class TrackingController {
     });
   }
 
+  /** Feed one BLE scan window (indoor checkpoints). Returns 'inactive' when no session is running. */
+  handleBeaconScan(scan: BeaconScan): Promise<'ok' | 'inactive'> {
+    return this.serial(async () => {
+      await this.ensureInit();
+      if (!this.sessionId) return 'inactive';
+      const r = this.deps.engine.processBeaconScan(scan, this.deps.now());
+      await this.handleEvents(r.events);
+      if (r.accepted) await this.persist();
+      this.publish();
+      return 'ok';
+    });
+  }
+
+  /** True when an enabled checkpoint needs BLE scans while tracking. */
+  needsBeaconScans(): boolean {
+    return this.deps.engine.needsBeaconScans();
+  }
+
+  /** Beacon ids of enabled BLE checkpoints (lets the scanner pick a screen-off-friendly filter). */
+  beaconIds(): string[] {
+    return this.deps.engine
+      .getCheckpoints()
+      .map((c) => c.expectedBeaconId)
+      .filter((id): id is string => !!id);
+  }
+
   /** Periodic timer while no fixes arrive (GPS loss). */
   tick(): Promise<void> {
     return this.serial(async () => {
@@ -219,12 +246,20 @@ export class TrackingController {
         .map((c) => ({
           id: c.id,
           name: c.name,
+          policy: c.positioningPolicy,
           latitude: c.latitude,
           longitude: c.longitude,
           radiusM: c.triggerRadiusM,
           priority: c.priority,
+          maxHorizontalAccuracyM: c.maxHorizontalAccuracyM,
           floor: c.floor,
           altitudeM: c.altitudeM,
+          altitudeReference: c.altitudeReference,
+          maxVerticalDifferenceM: c.maxVerticalDifferenceM,
+          maxVerticalUncertaintyM: c.maxVerticalUncertaintyM,
+          expectedBeaconId: c.expectedBeaconId,
+          minimumBeaconRssiDbm: c.minimumBeaconRssiDbm,
+          requiredBeaconObservations: c.requiredBeaconObservations,
         })),
       this.deps.now(),
     );
@@ -240,7 +275,7 @@ export class TrackingController {
       const cp = this.byId.get(e.checkpointId);
       const name = cp?.name ?? e.checkpointId;
       if (e.type === 'trigger') {
-        this.lastEventText = `Reached ${name} (${e.distanceM.toFixed(0)} m from centre)`;
+        this.lastEventText = `Reached ${name} (${e.evidence || 'confirmed'})`;
         const historyId = await this.deps.history.record({
           checkpointId: e.checkpointId,
           sessionId: this.sessionId,
@@ -248,6 +283,7 @@ export class TrackingController {
           playbackStatus: 'triggered',
           distanceM: e.distanceM,
           accuracyM: e.accuracyM,
+          evidence: e.evidence || null,
         });
         this.historyIds.set(e.checkpointId, historyId);
         let uri: string | null = null;

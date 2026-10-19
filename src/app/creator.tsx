@@ -15,7 +15,7 @@ import {
 } from '../location/expoLocation';
 import { LeafletMap } from '../map/LeafletMap';
 import { Banner, Button, Card, Muted, Row, Screen, StatusRow, colors, styles } from '../ui/components';
-import { accuracyTone, fmtAge, fmtMeters } from '../ui/format';
+import { accuracyTone, fmtAge, fmtMeters, POLICY_LABEL } from '../ui/format';
 import { useCheckpoints, useInterval, useServices } from '../ui/hooks';
 
 export default function CreatorMode() {
@@ -106,7 +106,14 @@ export default function CreatorMode() {
   const preview =
     fix && settings
       ? validateCheckpointDraft(
-          { name: 'new', latitude: fix.latitude, longitude: fix.longitude, triggerRadiusM: settings.defaultRadiusM, priority: 0 },
+          {
+            name: 'new',
+            positioningPolicy: 'OUTDOOR_GPS',
+            latitude: fix.latitude,
+            longitude: fix.longitude,
+            triggerRadiusM: settings.defaultRadiusM,
+            priority: 0,
+          },
           checkpoints,
           { duplicateDistanceM: settings.duplicateDistanceM, exitHysteresisM: settings.engine.exitHysteresisM, allowNearDuplicate: true },
         )
@@ -258,7 +265,9 @@ export default function CreatorMode() {
               >
                 <Text style={[styles.cardTitle, { color: c.enabled ? colors.text : colors.muted }]}>{c.name}</Text>
                 <Muted>
-                  r = {c.triggerRadiusM} m · priority {c.priority} · {describeAudioRef(c.audioUri, c.audioLabel)}
+                  {POLICY_LABEL[c.positioningPolicy]}
+                  {c.positioningPolicy === 'INDOOR_BLE_FLOOR' ? ` (floor ${c.floor})` : ''} · r = {c.triggerRadiusM} m ·
+                  priority {c.priority} · {describeAudioRef(c.audioUri, c.audioLabel)}
                   {fix ? ` · ${fmtMeters(distanceM(fix, c))} from you` : ''}
                 </Muted>
                 {!c.coordinatesVerified ? (

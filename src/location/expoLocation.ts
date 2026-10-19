@@ -1,17 +1,27 @@
 import * as Location from 'expo-location';
 import { PermissionsAndroid, Platform } from 'react-native';
-import type { LocationSample } from '../engine/types';
+import type { AltitudeReference, LocationSample } from '../engine/types';
+
+/**
+ * Datum of the altitude the platform reports: Android's Location.getAltitude()
+ * is height above the WGS84 ellipsoid; iOS reports height above mean sea level.
+ */
+export const DEVICE_ALTITUDE_REFERENCE: AltitudeReference = Platform.OS === 'ios' ? 'MSL' : 'ELLIPSOID';
 
 export function toSample(loc: Location.LocationObject, source = 'gnss'): LocationSample {
   const c = loc.coords;
+  // Android reports altitude 0 and vertical accuracy 0 when the fix has no altitude
+  // (hasAltitude()/hasVerticalAccuracy() false), which would look like a perfect fix.
+  const hasAltitude = c.altitude != null && c.altitudeAccuracy != null && c.altitudeAccuracy > 0;
   return {
     latitude: c.latitude,
     longitude: c.longitude,
     accuracyM: c.accuracy ?? null,
     timestampMs: loc.timestamp,
     speedMps: c.speed != null && c.speed >= 0 ? c.speed : null,
-    altitudeM: c.altitude ?? null,
-    altitudeAccuracyM: c.altitudeAccuracy ?? null,
+    altitudeM: hasAltitude ? c.altitude : null,
+    altitudeAccuracyM: hasAltitude ? c.altitudeAccuracy : null,
+    altitudeReference: hasAltitude ? DEVICE_ALTITUDE_REFERENCE : null,
     mocked: loc.mocked ?? false,
     source,
   };

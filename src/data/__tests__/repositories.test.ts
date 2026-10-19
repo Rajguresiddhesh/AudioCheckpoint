@@ -16,6 +16,7 @@ let n = 0;
 const newId = () => `id-${++n}`;
 const opts = { duplicateDistanceM: 5, exitHysteresisM: 10 };
 const base = {
+  positioningPolicy: 'OUTDOOR_GPS' as const,
   latitude: 19.22,
   longitude: 73.07,
   triggerRadiusM: 20,
@@ -64,6 +65,40 @@ describe('migrations', () => {
     };
     expect(await migrate(db, [...MIGRATIONS, v2])).toBe(LATEST_SCHEMA_VERSION + 1);
     expect((await repo.list()).map((c) => c.name)).toEqual(['Swing']);
+  });
+
+  it('upgrades a v1 database to v2 without losing checkpoints (existing ones stay GPS-only)', async () => {
+    const db = await SqlJsDb.create();
+    await migrate(db, MIGRATIONS.slice(0, 1));
+    await db.runAsync(
+      `INSERT INTO checkpoints (id,name,latitude,longitude,trigger_radius_m,audio_uri,floor,altitude_m,created_at,updated_at)
+       VALUES ('old','Swing',19.22,73.07,25,'melody:chime',2,512.5,1,1)`,
+      [],
+    );
+    await db.runAsync(
+      `INSERT INTO trigger_history (checkpoint_id, triggered_at, playback_status, distance_m) VALUES ('old', 5, 'completed', 3)`,
+      [],
+    );
+    expect(await migrate(db)).toBe(LATEST_SCHEMA_VERSION);
+    const [cp] = await new CheckpointRepository(db, newId).list();
+    expect(cp).toMatchObject({
+      id: 'old', name: 'Swing', triggerRadiusM: 25, audioUri: 'melody:chime', floor: 2, altitudeM: 512.5,
+      positioningPolicy: 'OUTDOOR_GPS', altitudeReference: 'ELLIPSOID', expectedBeaconId: null,
+    });
+    expect(await new TriggerHistoryRepository(db).recent()).toEqual([
+      expect.objectContaining({ checkpointId: 'old', distanceM: 3, evidence: null }),
+    ]);
+  });
+
+  it('the schema rejects an unknown positioning policy', async () => {
+    const db = await freshDb();
+    await expect(
+      db.runAsync(
+        `INSERT INTO checkpoints (id,name,latitude,longitude,trigger_radius_m,positioning_policy,created_at,updated_at)
+         VALUES ('x','X',1,1,20,'TELEPATHY',0,0)`,
+        [],
+      ),
+    ).rejects.toThrow(/CHECK/);
   });
 
   it('rolls back a failing migration and leaves the version unchanged', async () => {
@@ -119,6 +154,28 @@ describe('CheckpointRepository', () => {
     ).rejects.toThrow(/UNIQUE/);
   });
 
+  it('stores policy fields in canonical form with BLE defaults', async () => {
+    const db = await freshDb();
+    const repo = new CheckpointRepository(db, newId);
+    const cp = await repo.save(
+      {
+        ...base,
+        name: 'Gallery',
+        positioningPolicy: 'INDOOR_BLE_FLOOR',
+        floor: 2,
+        expectedBeaconId: 'iBeacon:F7826DA64FA24E988024BC5B71E0893E:1:2',
+      },
+      opts,
+    );
+    expect(cp).toMatchObject({
+      positioningPolicy: 'INDOOR_BLE_FLOOR',
+      floor: 2,
+      expectedBeaconId: 'ibeacon:f7826da6-4fa2-4e98-8024-bc5b71e0893e:1:2',
+      minimumBeaconRssiDbm: -75,
+      requiredBeaconObservations: 3,
+    });
+  });
+
   it('updates, toggles, reassigns audio and deletes', async () => {
     const db = await freshDb();
     const repo = new CheckpointRepository(db, newId);
@@ -149,6 +206,7 @@ describe('history, sessions, packages, settings', () => {
       playbackStatus: 'triggered',
       distanceM: 4,
       accuracyM: 5,
+      evidence: 'GPS ±5.0 m, 4.0 m from centre',
     });
     await hist.updateStatus(hid, 'completed');
     expect(await hist.recent()).toEqual([expect.objectContaining({ checkpointName: 'Swing', playbackStatus: 'completed' })]);

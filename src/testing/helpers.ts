@@ -10,7 +10,16 @@ export function checkpointAt(
   extra: Partial<EngineCheckpoint> = {},
 ): EngineCheckpoint {
   const p = destinationPoint(ORIGIN, bearing, distance);
-  return { id, name: id, latitude: p.latitude, longitude: p.longitude, radiusM: 20, priority: 0, ...extra };
+  return {
+    id,
+    name: id,
+    policy: 'OUTDOOR_GPS',
+    latitude: p.latitude,
+    longitude: p.longitude,
+    radiusM: 20,
+    priority: 0,
+    ...extra,
+  };
 }
 
 export interface FixOptions {
